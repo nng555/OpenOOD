@@ -1,7 +1,7 @@
 import os
 import torch
 from numpy import load
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 
 from openood.preprocessors.test_preprocessor import TestStandardPreProcessor
 from openood.preprocessors.utils import get_preprocessor
@@ -85,6 +85,19 @@ def get_dataloader(config: Config):
                                     shuffle=split_config.shuffle,
                                     num_workers=dataset_config.num_workers,
                                     sampler=sampler)
+            if split_config.get('class_loader', False):
+                class_loaders = []
+                for k in range(dataset_config.num_classes):
+                    k_idxs = [i for i, l in enumerate(dataset.labels) if l == k]
+                    k_dataset = Subset(dataset, k_idxs)
+                    class_loaders.append(DataLoader(
+                        k_dataset,
+                        batch_size=split_config.batch_size,
+                        shuffle=split_config.shuffle,
+                        num_workers=dataset_config.num_workers,
+                    ))
+                dataloader_dict[split + '_class'] = class_loaders
+
 
         dataloader_dict[split] = dataloader
     return dataloader_dict

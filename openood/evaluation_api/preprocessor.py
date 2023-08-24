@@ -11,6 +11,11 @@ default_preprocessing_dict = {
         'img_size': 32,
         'normalization': [[0.4914, 0.4822, 0.4465], [0.2470, 0.2435, 0.2616]],
     },
+    'mnist': {
+        'pre_size': 28,
+        'img_size': 28,
+        'normalization': [[0.5, 0.5, 0.5], [0.5, 0.5, 0.5]],
+    },
     'cifar100': {
         'pre_size': 32,
         'img_size': 32,

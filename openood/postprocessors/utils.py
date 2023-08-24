@@ -22,6 +22,7 @@ from .mcd_postprocessor import MCDPostprocessor
 from .mds_postprocessor import MDSPostprocessor
 from .mds_ensemble_postprocessor import MDSEnsemblePostprocessor
 from .mos_postprocessor import MOSPostprocessor
+from .nak_postprocessor import NAKPostprocessor
 from .npos_postprocessor import NPOSPostprocessor
 from .odin_postprocessor import ODINPostprocessor
 from .opengan_postprocessor import OpenGanPostprocessor
@@ -71,6 +72,7 @@ def get_postprocessor(config: Config):
         'dsvdd': DSVDDPostprocessor,
         'mos': MOSPostprocessor,
         'mcd': MCDPostprocessor,
+        'nak': NAKPostprocessor,
         'opengan': OpenGanPostprocessor,
         'knn': KNNPostprocessor,
         'dice': DICEPostprocessor,

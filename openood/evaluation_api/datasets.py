@@ -15,6 +15,62 @@ from openood.preprocessors import BasePreprocessor
 from .preprocessor import get_default_preprocessor, ImageNetCPreProcessor
 
 DATA_INFO = {
+
+    'mnist': {
+        'num_classes': 10,
+        'id': {
+            'train': {
+                'data_dir': 'images_classic/',
+                'imglist_path': 'benchmark_imglist/mnist/train_mnist.txt'
+            },
+            'val': {
+                'data_dir': 'images_classic/',
+                'imglist_path': 'benchmark_imglist/mnist/val_mnist.txt'
+            },
+            'test': {
+                'data_dir': 'images_classic/',
+                'imglist_path': 'benchmark_imglist/mnist/test_mnist.txt'
+            },
+        },
+        'csid': {
+            'datasets': [],
+        },
+        'ood': {
+            'near': {
+                'dataset': ['notmnist', 'fashionmnist'],
+                'notmnist': {
+                    'data_dir': 'images_classic/',
+                    'imglist_path': 'benchmark_imglist/mnist/test_notmnist.txt'
+                },
+                'fashionmnist': {
+                    'data_dir': 'images_classic/',
+                    'imglist_path': 'benchmark_imglist/mnist/test_fashionmnist.txt'
+                },
+            },
+            'far': {
+                'datasets': ['texture', 'cifar10', 'tin', 'places365'],
+                'texture': {
+                    'data_dir': 'images_classic/',
+                    'imglist_path':
+                    'benchmark_imglist/mnist/test_texture.txt'
+                },
+                'cifar10': {
+                    'data_dir': 'images_classic/',
+                    'imglist_path':
+                    'benchmark_imglist/mnist/test_cifar10.txt'
+                },
+                'tin': {
+                    'data_dir': 'images_classic/',
+                    'imglist_path': 'benchmark_imglist/mnist/test_tin.txt'
+                },
+                'places365': {
+                    'data_dir': 'images_classic/',
+                    'imglist_path':
+                    'benchmark_imglist/mnist/test_places365.txt'
+                },
+            },
+        },
+    },
     'cifar10': {
         'num_classes': 10,
         'id': {
@@ -454,7 +510,10 @@ def get_id_ood_dataloader(id_name, data_root, preprocessor, **loader_kwargs):
             num_classes=data_info['num_classes'],
             preprocessor=preprocessor,
             data_aux_preprocessor=test_standard_preprocessor)
+        sval = loader_kwargs['shuffle']
+        loader_kwargs['shuffle'] = True
         dataloader = DataLoader(dataset, **loader_kwargs)
+        loader_kwargs['shuffle'] = sval
         sub_dataloader_dict[split] = dataloader
     dataloader_dict['id'] = sub_dataloader_dict
 

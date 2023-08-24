@@ -1,0 +1,10 @@
+postprocessor:
+  name: nak
+  APS_mode: False
+  postprocessor_args:
+    damping: 0.1
+    maxiter: 15
+    left_output: logits
+    strat: min
+    right_output: loss
+    topk: 10

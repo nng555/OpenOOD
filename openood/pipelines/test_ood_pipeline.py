@@ -3,7 +3,7 @@ import time
 from openood.datasets import get_dataloader, get_ood_dataloader
 from openood.evaluators import get_evaluator
 from openood.networks import get_network
-from openood.postprocessors import get_postprocessor
+from openood.postprocessors import get_postprocessor, BasePostprocessor
 from openood.utils import setup_logger
 
 
@@ -33,17 +33,18 @@ class TestOODPipeline:
         print(u'\u2500' * 70, flush=True)
 
         # start calculating accuracy
+        base_postprocessor = BasePostprocessor(None)
         print('\nStart evaluation...', flush=True)
         if self.config.evaluator.ood_scheme == 'fsood':
             acc_metrics = evaluator.eval_acc(
                 net,
                 id_loader_dict['test'],
-                postprocessor,
+                base_postprocessor,
                 fsood=True,
                 csid_data_loaders=ood_loader_dict['csid'])
         else:
             acc_metrics = evaluator.eval_acc(net, id_loader_dict['test'],
-                                             postprocessor)
+                                             base_postprocessor)
         print('\nAccuracy {:.2f}%'.format(100 * acc_metrics['acc']),
               flush=True)
         print(u'\u2500' * 70, flush=True)

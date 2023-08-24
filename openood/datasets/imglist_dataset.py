@@ -37,6 +37,13 @@ class ImglistDataset(BaseDataset):
         self.name = name
         with open(imglist_pth) as imgfile:
             self.imglist = imgfile.readlines()
+
+        # hack together a label list for subset
+        self.labels = []
+        for line in self.imglist:
+            _, extra_str = line.strip('\n').split(' ', 1)
+            self.labels.append(int(extra_str))
+
         self.data_dir = data_dir
         self.num_classes = num_classes
         self.preprocessor = preprocessor

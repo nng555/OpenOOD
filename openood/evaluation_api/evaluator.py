@@ -247,6 +247,7 @@ class Evaluator:
             self.net.eval()
 
             # id score
+
             if self.scores['id']['test'] is None:
                 print(f'Performing inference on {self.id_name} test set...',
                       flush=True)
