@@ -34,107 +34,137 @@ class NAKPostprocessor(BasePostprocessor):
         else:
             self.topk = self.args.topk
         self.exemplars = {}
+        self.nak_exemplars = {}
         self.avg_grad = None
+        self.mdl_weight = self.args.mdl_weight
+        self.top_layer = self.args.top_layer
+        self.layer_eps = self.args.layer_eps
+        self.temperature = self.args.temperature
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
-        # eigh fails for some reason
-        self.optimizer = EKFAC(
-            net,
-            eps=self.damping,
-            niters=self.maxiter,
-            sua=True,
-        )
-        ekfac_path = 'ekfac.cpt'
+        if not self.top_layer:
+            fc = None
+            self.optimizer = EKFAC(
+                net,
+                eps=self.damping,
+                niters=self.maxiter,
+                sua=True,
+                layer_eps=self.layer_eps,
+            )
+        else:
+            fc = net.fc
+            self.optimizer = EKFAC(
+                fc,
+                eps=self.damping,
+                niters=self.maxiter,
+                sua=True,
+                layer_eps=self.layer_eps,
+            )
 
         if not self.setup_flag:
-            if os.path.exists(ekfac_path):
-                ekfac_state = torch.load(ekfac_path)
-                self.optimizer.load_state_dict(ekfac_state)
-
+            if self.top_layer:
+                self.numel = np.sum([p.numel() for p in fc.parameters()])
+                self.optimizer.init_hooks(fc, True)
             else:
                 self.numel = np.sum([p.numel() for p in net.parameters()])
                 self.optimizer.init_hooks(net, True)
-                # accumulate activations and gradients
-                with torch.enable_grad():
-                    for i, batch in enumerate(tqdm(id_loader_dict['train'],
-                                                   desc="EKFAC: ",
-                                                   position=0,
-                                                   leave=True,
-                                                   total=self.maxiter)):
 
-                        data = batch['data'].cuda()
+            if self.mdl_weight == 0:
+                self.mdl_weight = len(id_loader_dict['train'].dataset)
 
-                        if i == self.maxiter:
-                            break
-                        net.zero_grad()
-                        self.optimizer.zero_grad()
+            # accumulate activations and gradients
+            with torch.enable_grad():
+                for i, batch in enumerate(tqdm(id_loader_dict['train'],
+                                               desc="EKFAC: ",
+                                               position=0,
+                                               leave=True,
+                                               total=self.maxiter)):
 
-                        # sample labels from model distribution
-                        logits = net(data)
-                        probs = F.softmax(logits, -1)
-                        labels = torch.multinomial(probs.detach(), 1).squeeze()
-                        loss = F.cross_entropy(logits, labels)
-                        loss.backward(retain_graph=True)
+                    data = batch['data'].cuda()
 
-                # manually compute KFE
-                for group in self.optimizer.param_groups:
-                    # Getting parameters
-                    if len(group['params']) == 2:
-                        weight, bias = group['params']
-                    else:
-                        weight = group['params'][0]
-                        bias = None
-                    state = self.optimizer.state[weight]
-                    # Update convariances and inverses
-                    if group['layer_type'] == 'BatchNorm2d':
-                        self.optimizer._update_diagonal(group, state)
-                    else:
-                        self.optimizer._compute_kfe(group, state)
-
-                self.optimizer.__del__()
-                """
-                with torch.enable_grad():
-                    for i, batch in enumerate(tqdm(id_loader_dict['train'],
-                                                   desc="Average Grad: ",
-                                                   position=0,
-                                                   leave=True,
-                                                   total=self.maxiter)):
-                        if i == 100:
-                            break
-                        data = batch['data'].cuda()
-                        logits = net(data)
-                        net.zero_grad()
-                        self.optimizer.zero_grad()
-                        loss = F.cross_entropy(logits, batch['label'].cuda())
-                        loss.backward()
-
-                        if self.avg_grad is None:
-                            self.avg_grad = [p.grad.data / self.maxiter for p in net.parameters()]
-                        else:
-                            self.avg_grad = [avg_grad + p.grad.data / self.maxiter for avg_grad, p in zip(self.avg_grad, net.parameters())]
-
-                for k, k_loader in enumerate(id_loader_dict['train_class']):
+                    if i == self.maxiter:
+                        break
                     net.zero_grad()
                     self.optimizer.zero_grad()
-                    for batch in k_loader:
-                        assert k == batch['label'][0].item()
-                        with torch.enable_grad():
-                            logits = net(batch['data'].cuda())
-                            logits[0][k].backward()
+
+                    # sample labels from model distribution
+                    logits = net(data)
+                    probs = F.softmax(logits, -1)
+                    labels = torch.multinomial(probs.detach(), 1).squeeze()
+                    loss = F.cross_entropy(logits, labels)
+                    loss.backward()
+
+            # manually compute KFE
+            for group in self.optimizer.param_groups:
+                # Getting parameters
+                if len(group['params']) == 2:
+                    weight, bias = group['params']
+                else:
+                    weight = group['params'][0]
+                    bias = None
+                state = self.optimizer.state[weight]
+                # Update convariances and inverses
+                if group['layer_type'] == 'BatchNorm2d':
+                    self.optimizer._update_diagonal(group, state)
+                else:
+                    self.optimizer._compute_kfe(group, state)
+
+            self.optimizer.__del__()
+
+            """
+            with torch.enable_grad():
+                for i, batch in enumerate(tqdm(id_loader_dict['train'],
+                                               desc="Average Grad: ",
+                                               position=0,
+                                               leave=True,
+                                               total=self.maxiter)):
+                    if i == 50:
                         break
-                    grads = [p.grad.data for p in net.parameters()]
-                    self.exemplars[k] = grads
-                """
+                    data = batch['data'].cuda()
+                    logits = net(data)
+                    net.zero_grad()
+                    self.optimizer.zero_grad()
+                    loss = F.cross_entropy(logits, batch['label'].cuda())
+                    loss.backward()
 
+                    if self.avg_grad is None:
+                        self.avg_grad = {p: p.grad.data / self.maxiter for p in net.parameters()}
+                    else:
+                        self.avg_grad = {p: self.avg_grad[p] + p.grad.data / self.maxiter for p in net.parameters()}
+            self.avg_grad = {p: self.avg_grad[p].unsqueeze(0) for p in self.avg_grad}
+            """
 
+            """
+            self.nak_grads = []
+            self.naks = []
+            for k, k_loader in enumerate(id_loader_dict['val_class']):
+                net.zero_grad()
+                self.optimizer.zero_grad()
+                for batch in k_loader:
+                    assert k == batch['label'][0].item()
+                    with torch.enable_grad():
+                        logits = net(batch['data'].cuda())
+                        logits[0][k].backward()
+                    break
+                grads = {p: p.grad.data for p in net.parameters()}
+                self.nak_grads.append(grads)
+                #self.exemplars[k] = grads
+                self.optimizer.step()
+                nat_grads = {p: p.grad.data for p in net.parameters()}
+                nak = np.sum([(torch.dot(lg.flatten(), rg.flatten()) / self.numel).cpu().numpy() for lg, rg in zip(grads.values(), nat_grads.values())])
+                self.naks.append(nak)
+
+            self.nak_grads = {p: torch.stack([grads[p] for grads in self.nak_grads]) for p in self.nak_grads[0]}
+            self.naks = torch.Tensor(self.naks).cuda()
+            """
             self.setup_flag = True
 
         else:
             pass
 
     def loss(self, logits):
-        return -F.log_softmax(logits / 10, dim=-1)
+        return -F.log_softmax(logits / self.temperature, dim=-1)
 
     def softmax(self, logits):
         return F.softmax(logits, dim=-1)
@@ -186,60 +216,129 @@ class NAKPostprocessor(BasePostprocessor):
                 label = logits.detach().argmax(-1)
                 loss = F.cross_entropy(logits, label)
                 loss.backward(retain_graph=True)
-
+                #logits[0][label.item()].backward()
                 self.optimizer.step()
                 nat_grads = [param.grad.data for param in net.parameters()]
-
                 net.zero_grad()
                 self.optimizer.zero_grad()
-                logits[0][label].backward()
+                loss = F.kl_div(logits, torch.ones_like(logits) / self.num_classes, reduction='batchmean')
+                loss.backward()
+                raw_grads = [param.grad.data for param in net.parameters()]
 
-                ex_grads = [param.grad.data for param in net.parameters()]
+                #net.zero_grad()
+                #self.optimizer.zero_grad()
+                #logits[0][label].backward()
+
+                #ex_grads = [param.grad.data for param in net.parameters()]
 
             #exemplar = self.exemplars[label.item()]
             #ex_logits = net.forward(exemplar.unsqueeze(0).cuda())
             #ex_loss = F.cross_entropy(ex_logits, label)
             #ex_loss.backward()
             #ex_grads = [param.grad.data for param in net.parameters()]
-            ex_grads = self.exemplars[label.item()]
+            #ex_grads = self.nak_grads[label.item()]
             #ex_grads = self.avg_grad
 
-            conf.append(-np.sum([(torch.dot(lg.flatten(), rg.flatten()) / self.numel).cpu().numpy() for lg, rg in zip(ex_grads, nat_grads)]))
+            #self_ex_nak = np.sum([(torch.dot(lg.flatten(), rg.flatten()) / self.numel).cpu().numpy() for lg, rg in zip(ex_grads, nat_grads)])
+            self_nak = np.sum([(torch.dot(lg.flatten(), rg.flatten()) / self.numel).cpu().numpy() for lg, rg in zip(raw_grads, nat_grads)])
+            conf.append(self_nak)
+            #ex_nak = self.naks[label.item()]
+
+            #cosine_sim = self_ex_nak / np.sqrt(self_nak * ex_nak)
+            #conf.append(cosine_sim)
+
+            #conf.append(-self_ex_nak + 0.5 * (self_nak + ex_nak))
         """
         pred = []
         conf = []
 
         data = data.cuda()
-        logits = net.forward(data)
+        logits, features = net.forward(data, return_feature=True)
         pred = torch.argmax(logits, -1)
-        func, params, buffers = make_functional_with_buffers(net)
 
-        for logits, idv_batch in zip(logits, data):
+        if self.top_layer:
+            func, params, buffers = make_functional_with_buffers(net.fc)
+        else:
+            func, params, buffers = make_functional_with_buffers(net)
+
+        for logits, idv_batch, idv_feature in zip(logits, data, features):
             net.zero_grad()
             self.optimizer.zero_grad()
 
             with torch.enable_grad():
-                fjac = jacrev(func)(params, buffers, idv_batch.unsqueeze(0))
-                grads = {p: j[0] for p, j in zip(net.parameters(), fjac)}
+                if self.top_layer:
+                    fjac = jacrev(func)(params, buffers, idv_feature.unsqueeze(0))
+                    grads = {p: j[0] for p, j in zip(net.fc.parameters(), fjac)}
+                else:
+                    fjac = jacrev(func)(params, buffers, idv_batch.unsqueeze(0))
+                    grads = {p: j[0] for p, j in zip(net.parameters(), fjac)}
                 # TODO: maybe handle the non-transformed grads?
-                nak = self.optimizer.step(grads=grads)
+
+            self_nak = self.optimizer.step(grads=grads)
+            #self_ex_nak = self.optimizer.step(grads=grads, left_grads=self.nak_grads)
 
             del grads
             del fjac
             gc.collect()
             torch.cuda.empty_cache()
 
-            right_link = self.get_link_fn(self.right_output)
-            rgrad = jacrev(right_link)(logits).squeeze()
+            if self.right_output != 'logits':
+                right_link = self.get_link_fn(self.right_output)
+                rgrad = jacrev(right_link)(logits).squeeze()
+                self_nak = torch.einsum('lr,or -> lo', self_nak, rgrad)
+                #self_ex_nak = self_ex_nak @ rgrad.t()
 
-            left_link = self.get_link_fn(self.left_output)
-            lgrad = jacrev(left_link)(logits).squeeze()
+            if self.left_output != 'logits':
+                left_link = self.get_link_fn(self.left_output)
+                lgrad = jacrev(left_link)(logits).squeeze()
+                self_nak = torch.einsum('ol,lr -> or', lgrad, self_nak)
+                #self_nak = lgrad @ self_nak
 
             # output dim is the first dimension if it exists
-            nak = -lgrad @ nak @ rgrad.t()
+            #nak_dist = -self_ex_nak.diagonal() + 0.5 * (self_nak.diagonal() + self.naks)
+            #nak_dist = -self_ex_nak + 0.5 * self_nak.diagonal()
 
-            import ipdb; ipdb.set_trace()
+            #conf.append(nak_dist.min())
+            label = logits.detach().argmax(-1)
+            probs = F.softmax(logits, -1)
+            #conf.append(nak_dist.max())
+            #conf.append(self_nak.diagonal().mean())
+            conf.append(-self_nak.diagonal().mean())
 
+            #conf.append(-self_nak.diagonal()[label] + probs[label] * self_nak.diagonal().sum())
+
+            #conf.append(nak.diagonal()[label.item()] / nak.diagonal().sum())
+
+            def mdl(weight):
+                if self.left_output == 'softmax':
+                    if weight == None:
+                        time = (1 - F.softmax(logits)) / self_nak.diagonal()
+                        mle_probs = F.softmax(logits) - self_nak.diagonal() * time.min()
+                    else:
+                        mle_probs = F.softmax(logits) - self_nak.diagonal() / weight
+                elif self.left_output == 'logits':
+                    mle_probs = F.softmax(logits - self_nak.t() / weight, -1).diagonal()
+                mdl_probs = mle_probs / mle_probs.sum()
+                return mdl_probs, mle_probs, torch.log(mle_probs.sum())
+            #conf.append(self_nak.diagonal() @ F.softmax(logits, -1))
+            #conf.append((self_nak @ F.softmax(logits, -1)).sum())
+
+            #mdl_probs, mle_probs, regret = mdl(self.mdl_weight)
+            #conf.append(-regret)
+            #conf.append(self_nak.sum(0).min() / self_nak.sum())
+
+
+            #mdl_grad = jacrev(mdl)(torch.tensor(float(self.mdl_weight)))
+            #regret = torch.log(mdl) - torch.log(F.softmax(logits))
+            #mdl_regret = torch.log(mle_probs) - torch.log(mdl)
+            #print(mdl.max() - F.softmax(logits).max())
+            #mdl_probs, regret = mdl(self.mdl_weight)
+            #time = (1 - F.softmax(logits)) / nak.diagonal()
+            #conf.append(((1 - F.softmax(logits)) / nak.diagonal())[label.item()])
+            #conf.append(regret.mean())
+            #if F.softmax(logits).max() < 0.8:
+            #    import ipdb; ipdb.set_trace()
+        """
             if self.strat == 'mean':
                 nak = nak.diagonal()
                 conf.append(nak.mean())
@@ -254,8 +353,10 @@ class NAKPostprocessor(BasePostprocessor):
                 conf.append(nak @ F.softmax(logits))
             elif self.strat == 'minmax':
                 conf.append(-nak.max(-2)[0].min(-1)[0])
+        """
 
-        print(torch.Tensor(conf).mean())
+        npconf = torch.Tensor(conf).numpy()
+        #print([npconf.max(), npconf.min(), npconf.mean()])
         return torch.Tensor(pred), torch.Tensor(conf)
 
         """
@@ -303,7 +404,7 @@ class NAKPostprocessor(BasePostprocessor):
 
 class EKFAC(Optimizer):
 
-    def __init__(self, net, eps, niters, sua=False):
+    def __init__(self, net, eps, niters, sua=False, layer_eps=True):
         """ EKFAC Preconditionner for Linear and Conv2d layers.
 
         Computes the EKFAC of the second moment of the gradients.
@@ -326,6 +427,7 @@ class EKFAC(Optimizer):
         self._fwd_handles = []
         self._bwd_handles = []
         self.numel = 0
+        self.layer_eps = layer_eps
         self._iteration_counter = 1
         for mod in net.modules():
             mod_class = mod.__class__.__name__
@@ -361,7 +463,7 @@ class EKFAC(Optimizer):
                     handle = mod.register_full_backward_hook(self._save_grad_output)
                 self._bwd_handles.append(handle)
 
-    def step(self, update_stats=True, update_params=True, grads=None):
+    def step(self, update_stats=True, update_params=True, grads=None, left_grads=None):
         """Performs one step of preconditioning."""
         nak_cum = None
 
@@ -393,14 +495,20 @@ class EKFAC(Optimizer):
 
             if nat_wgrad is not None:
                 ncls = nat_wgrad.shape[0]
-                nak = torch.mm(wgrad.reshape(ncls, -1), nat_wgrad.reshape(ncls, -1).t()) / self.numel
+                if left_grads is None:
+                    nak = torch.mm(wgrad.reshape(wgrad.shape[0], -1), nat_wgrad.reshape(nat_wgrad.shape[0], -1).t()) / self.numel
+                else:
+                    nak = torch.mm(left_grads[weight].reshape(left_grads[weight].shape[0], -1), nat_wgrad.reshape(nat_wgrad.shape[0], -1).t()) / self.numel
                 if nak_cum is None:
                     nak_cum = nak
                 else:
                     nak_cum += nak
 
                 if nat_bgrad is not None:
-                    nak = torch.mm(bgrad.reshape(ncls, -1), nat_bgrad.reshape(ncls, -1).t()) / self.numel
+                    if left_grads is None:
+                        nak = torch.mm(bgrad.reshape(bgrad.shape[0], -1), nat_bgrad.reshape(nat_bgrad.shape[0], -1).t()) / self.numel
+                    else:
+                        nak = torch.mm(left_grads[bias].reshape(left_grads[bias].shape[0], -1), nat_bgrad.reshape(nat_bgrad.shape[0], -1).t()) / self.numel
                     nak_cum += nak
         self._iteration_counter += 1
         return nak_cum
@@ -448,7 +556,12 @@ class EKFAC(Optimizer):
 
         #m2 = m2.add(g_kfe**2)
         # layerwise multiplicative damping
-        g_nat_kfe = g_kfe / (m2 + (self.eps * m2.mean()))
+        if self.layer_eps:
+            eps = self.eps * m2.max()
+        else:
+            eps = self.eps
+
+        g_nat_kfe = g_kfe / (m2 + eps)
         g_nat = torch.matmul(torch.matmul(kfe_gy, g_nat_kfe), kfe_x.t())
 
         if bias is not None:
@@ -491,7 +604,11 @@ class EKFAC(Optimizer):
         #m2 = m2.add(g_kfe**2)
 
         # layerwise multiplicative damping
-        g_nat_kfe = g_kfe / (m2 + (self.eps * m2.mean()))
+        if self.layer_eps:
+            eps = self.eps * m2.max()
+        else:
+            eps = self.eps
+        g_nat_kfe = g_kfe / (m2 + eps)
         g_nat = self._to_kfe_sua(g_nat_kfe, kfe_x.t(), kfe_gy.t())
         if bias is not None:
             gb = g_nat[:, :, -1, s[3]//2, s[4]//2]
@@ -517,13 +634,21 @@ class EKFAC(Optimizer):
         if g is None:
             g = weight.grad.data.unsqueeze(0)
         fw = state['exact_fw']
-        g_nat = g / (fw + self.eps * fw.mean())
+        if self.layer_eps:
+            eps = self.eps * fw.max()
+        else:
+            eps = self.eps
+        g_nat = g / (fw + eps)
 
         if bias is not None:
             if gb is None:
                 gb = bias.grad.data.unsqueeze(0)
             fb = state['exact_fb']
-            gb_nat = gb / (fb + self.eps * fb.mean())
+            if self.layer_eps:
+                eps = self.eps * fb.max()
+            else:
+                eps = self.eps
+            gb_nat = gb / (fb + eps)
 
             if bias.grad is not None:
                 bias.grad.data = gb_nat.squeeze()

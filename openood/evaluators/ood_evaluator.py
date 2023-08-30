@@ -46,11 +46,14 @@ class OODEvaluator(BaseEvaluator):
             self.hyperparam_search(net, id_data_loaders['val'],
                                    ood_data_loaders['val'], postprocessor)
 
-        print(f'Performing inference on {dataset_name} dataset...', flush=True)
-        id_pred, id_conf, id_gt = postprocessor.inference(
-            net, id_data_loaders['test'])
-        if self.config.recorder.save_scores:
-            self._save_scores(id_pred, id_conf, id_gt, dataset_name)
+        if self.config.postprocessor.skip_id:
+            id_pred = id_conf = id_gt = None
+        else:
+            print(f'Performing inference on {dataset_name} dataset...', flush=True)
+            id_pred, id_conf, id_gt = postprocessor.inference(
+                net, id_data_loaders['test'])
+            if self.config.recorder.save_scores:
+                self._save_scores(id_pred, id_conf, id_gt, dataset_name)
 
         if fsood:
             # load csid data and compute confidence

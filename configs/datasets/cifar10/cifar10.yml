@@ -21,13 +21,13 @@ dataset:
     imglist_pth: ./data/benchmark_imglist/cifar10/train_cifar10.txt
     batch_size: 128
     shuffle: True
-    class_loader: True
   val:
     dataset_class: ImglistDataset
     data_dir: ./data/images_classic/
     imglist_pth: ./data/benchmark_imglist/cifar10/val_cifar10.txt
     batch_size: 200
     shuffle: False
+    class_loader: True
   test:
     dataset_class: ImglistDataset
     data_dir: ./data/images_classic/
