@@ -42,6 +42,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.layer_eps = self.args.layer_eps
         self.eps_type = self.args.eps_type
         self.temperature = self.args.temperature
+        self.relative = self.args.relative
         self.all_classes = self.args.all_classes
         self.sum_labels = self.args.sum_labels
         self.inverse = self.args.inverse
@@ -251,128 +252,121 @@ class NAKPostprocessor(BasePostprocessor):
         else:
             raise NotImplementedError
 
+    def backward_link(self, link, logits, retain_graph=False, sum_labels=False):
+        if link == 'loss':
+            if sum_labels:
+                F.cross_entropy(logits, torch.ones_like(logits) / self.num_classes).backward(retain_graph=retain_graph)
+            else:
+                (-F.log_softmax(logits, -1))[0][logits.argmax()].backward(retain_graph=retain_graph)
+        elif link == 'softmax':
+            if sum_labels:
+                F.softmax(logits, -1).sum().backward(retain_graph=retain_graph)
+            else:
+                F.softmax(logits, -1)[0][logits.argmax()].backward(retain_graph=retain_graph)
+        elif link == 'logits':
+            if sum_labels:
+                torch.sum(logits).backward(retain_graph=retain_graph)
+            else:
+                logits[0][logits.argmax()].backward(retain_graph=retain_graph)
+
     @torch.no_grad()
     def postprocess(self, net: nn.Module, data: Any):
         pred = []
         conf = []
 
         if not self.all_classes:
-            """
-            if self.top_layer:
-                data = data.cuda()
-                logits, features = net.forward(data, return_feature=True)
-                pred = torch.argmax(logits, -1)
-
-                for logits, features in zip(logits, features):
-                    with torch.enable_grad():
-                        net.zero_grad()
-                        self.optimizer.zero_grad()
-
-                        logits = net.fc.forward(features.unsqueeze(0))
-                        label = logits[0].detach().argmax(-1).item()
-                        net.zero_grad()
-                        self.optimizer.zero_grad()
-                        if self.right_output == 'loss':
-                            if self.sum_labels:
-                                F.cross_entropy(logits, torch.ones_like(logits) / self.num_classes).backward(retain_graph=True)
-                            else:
-                                (-F.log_softmax(logits, -1))[0][label].backward(retain_graph=True)
-                        elif self.right_output == 'softmax':
-                            if self.sum_labels:
-                                F.softmax(logits, -1).sum().backward(retain_graph=True)
-                            else:
-                                F.softmax(logits, -1)[0][label].backward(retain_graph=True)
-                        elif self.right_output == 'logits':
-                            if self.sum_labels:
-                                logits.sum().backward(retain_graph=True)
-                            else:
-                                logits[0][label].backward(retain_graph=True)
-                        raw_grads = {param: param.grad.data for param in net.fc.parameters()}
-                        self.optimizer.step()
-                        nat_grads = {param: param.grad.data for param in net.fc.parameters()}
-
-                        net.zero_grad()
-                        self.optimizer.zero_grad()
-
-                        if self.left_output == 'loss':
-                            if self.sum_labels:
-                                F.cross_entropy(logits, torch.ones_like(logits) / self.num_classes).backward()
-                            else:
-                                (-F.log_softmax(logits, -1))[0][label].backward()
-                        elif self.left_output == 'softmax':
-                            if self.sum_labels:
-                                F.softmax(logits, -1).sum().backward()
-                            else:
-                                F.softmax(logits, -1)[0][label].backward()
-                        elif self.left_output == 'logits':
-                            if self.sum_labels:
-                                logits.sum().backward()
-                            else:
-                                logits[0][label].backward()
-                        left_grads = {param: param.grad.data for param in net.fc.parameters()}
-
-                    self_nak = self.optimizer.dict_dot(left_grads, nat_grads)
-
-                    conf.append(self_nak)
-            else:
-            """
             data = data.cuda()
             logits = net.forward(data)
             pred = torch.argmax(logits, -1)
 
-            for logits, idv_batch in zip(logits, data):
+            for idv_batch in data:
                 with torch.enable_grad():
                     net.zero_grad()
                     self.optimizer.zero_grad()
 
                     logits = net.forward(idv_batch.unsqueeze(0))
                     label = logits[0].detach().argmax(-1).item()
+
                     net.zero_grad()
                     self.optimizer.zero_grad()
-                    if self.right_output == 'loss':
-                        if self.sum_labels:
-                            F.cross_entropy(logits, torch.ones_like(logits) / self.num_classes).backward()
-                        else:
-                            (-F.log_softmax(logits, -1))[0][label].backward()
-                    elif self.right_output == 'softmax':
-                        if self.sum_labels:
-                            F.softmax(logits, -1).sum().backward()
-                        else:
-                            F.softmax(logits, -1)[0][label].backward()
-                    elif self.right_output == 'logits':
-                        if self.sum_labels:
-                            logits.sum().backward()
-                        else:
-                            logits[0][label].backward()
+                    self.backward_link(self.right_output, logits, retain_graph=True, sum_labels=True)
 
-                    #raw_grads = {param: param.grad.data for param in net.parameters()}
-                    #norm = torch.sqrt(self.optimizer.dict_dot(raw_grads, raw_grads))
-                    #for p in net.parameters():
-                    #    p.grad.data = p.grad.data / norm
-                    #norm_grads = {p: p.grad.data for p in net.parameters()}
-
-                    raw_grads = {p: p.grad.data for p in net.parameters()}
+                    right_grads = {p: p.grad.data for p in net.parameters()}
                     self.optimizer.step(inverse=self.inverse)
-                    nat_grads = {param: param.grad.data for param in net.parameters()}
+                    right_nat_grads = {p: p.grad.data for p in net.parameters()}
 
-                self_nak = self.optimizer.dict_dot(raw_grads, nat_grads)
-                harmr = self.optimizer.dict_dot(nat_grads, nat_grads) / self_nak
-                #self_ex_nak = self.optimizer.dict_dot(self.nak_grads[label], nat_grads)
-                #self_ex_nak = self.optimizer.dict_dot(self.avg_grad, nat_grads)
+                    net.zero_grad()
+                    self.optimizer.zero_grad()
 
-                grad_dot = self.optimizer.dict_dot(raw_grads, raw_grads)
-                self_nak /= grad_dot
-                #self_ex_nak /= torch.sqrt(self_nak)
-                #self_ex_nak /= (torch.sqrt(grad_dot) * torch.sqrt(self.nak_dots[label]))
-                conf.append(self_nak)
+                    if self.right_output == self.left_output:
+                        left_grads = right_grads
+                    else:
+                        self.backward_link(self.left_output, logits, retain_graph=True, sum_labels=False)
+                        left_grads = {p: p.grad.data for p in net.parameters()}
+                    sum_nak = self.optimizer.dict_dot(left_grads, right_nat_grads)
 
+                    if not self.relative:
+                        conf.append(-sum_nak)
+                        continue
+
+                    net.zero_grad()
+                    self.optimizer.zero_grad()
+                    self.backward_link(self.right_output, logits, retain_graph=True, sum_labels=False)
+
+                    right_grads = {p: p.grad.data for p in net.parameters()}
+                    self.optimizer.step(inverse=self.inverse)
+                    right_nat_grads = {p: p.grad.data for p in net.parameters()}
+
+                    net.zero_grad()
+                    self.optimizer.zero_grad()
+
+                    if self.right_output == self.left_output:
+                        left_grads = right_grads
+                    else:
+                        self.backward_link(self.left_output, logits, retain_graph=False, sum_labels=False)
+                        left_grads = {p: p.grad.data for p in net.parameters()}
+
+                    max_nak = self.optimizer.dict_dot(left_grads, right_nat_grads)
+
+                    conf.append(-max_nak / sum_nak)
         else:
             pred = []
             conf = []
 
-            data = data.cuda()
-            logits, features = net.forward(data, return_feature=True)
-            pred = torch.argmax(logits, -1)
+
+            #conf.append(-self_nak.diagonal()[label] + probs[label] * self_nak.diagonal().sum())
+
+            #conf.append(nak.diagonal()[label.item()] / nak.diagonal().sum())
+
+            def mdl(weight):
+                if self.left_output == 'softmax':
+                    if weight == None:
+                        time = (1 - F.softmax(logits)) / self_nak.diagonal()
+                        mle_probs = F.softmax(logits) - self_nak.diagonal() * time.min()
+                    else:
+                        mle_probs = F.softmax(logits) - self_nak.diagonal() / weight
+                elif self.left_output == 'logits':
+                    mle_probs = F.softmax(logits - self_nak.t() / weight, -1).diagonal()
+                mdl_probs = mle_probs / mle_probs.sum()
+                return mdl_probs, mle_probs, torch.log(mle_probs.sum())
+            #conf.append(self_nak.diagonal() @ F.softmax(logits, -1))
+            #conf.append((self_nak @ F.softmax(logits, -1)).sum())
+
+            #mdl_probs, mle_probs, regret = mdl(self.mdl_weight)
+            #conf.append(-regret)
+            #conf.append(self_nak.sum(0).min() / self_nak.sum())
+
+
+            #mdl_grad = jacrev(mdl)(torch.tensor(float(self.mdl_weight)))
+            #regret = torch.log(mdl) - torch.log(F.softmax(logits))
+            #mdl_regret = torch.log(mle_probs) - torch.log(mdl)
+            #print(mdl.max() - F.softmax(logits).max())
+            #mdl_probs, regret = mdl(self.mdl_weight)
+            #time = (1 - F.softmax(logits)) / nak.diagonal()
+            #conf.append(((1 - F.softmax(logits)) / nak.diagonal())[label.item()])
+            #conf.append(regret.mean())
+            #if F.softmax(logits).max() < 0.8:
+            #    import ipdb; ipdb.set_trace()
 
             if self.top_layer:
                 func, params, buffers = make_functional_with_buffers(net.fc)
@@ -408,64 +402,21 @@ class NAKPostprocessor(BasePostprocessor):
                     right_link = self.get_link_fn(self.right_output)
                     rgrad = jacrev(right_link)(logits).squeeze()
                     self_nak = torch.einsum('lr,or -> lo', self_nak, rgrad)
-                    #ntk = torch.einsum('lr,or -> lo', ntk, rgrad)
-                    #ray = torch.einsum('lr,or -> lo', ray, rgrad)
-                    #nat_dot = torch.einsum('lr,or -> lo', nat_dot, rgrad)
 
                 if self.left_output != 'logits':
                     left_link = self.get_link_fn(self.left_output)
                     lgrad = jacrev(left_link)(logits).squeeze()
                     self_nak = torch.einsum('ol,lr -> or', lgrad, self_nak)
-                    #ntk = torch.einsum('ol,lr -> or', lgrad, ntk)
-                    #ray = torch.einsum('ol,lr -> or', lgrad, ray)
-                    #nat_dot = torch.einsum('ol,lr -> or', lgrad, nat_dot)
-
-                # normalize gradients???
-                #norms = torch.sqrt(self.optimizer.dict_bdot(grads, grads).diagonal())
-                #grads = {p: j / norms.view(self.num_classes, *([1] * (j.ndim - 1))) for p, j in grads.items()}
-                #grads = {p: j / torch.norm(j) for p, j in grads.items()}
-                #self_ex_naks = [self.optimizer.dict_bdot(self.nak_grads[i], nat_grads) for i in range(self.num_classes)]
-                #hess_grads = self.optimizer.step(grads=grads, inverse=False)
-                #ntk = self.optimizer.dict_bdot(grads, grads)
-                #hess_nak = self.optimizer.dict_bdot(grads, hess_grads)
-                #hess_ray = hess_nak.diagonal() / ntk.diagonal()
-                #ray = nak.diagonal() / ntk.diagonal()
-                #ray = hess_nak.diagonal()[logits.argmax()] / ntk.diagonal()[logits.argmax()]
-                #nat_grads = self.optimizer.step(grads=grads, inverse=True, eps=-ray)
-                #nat_ntk = self.optimizer.dict_bdot(nat_grads, nat_grads)
-                #self_nak = self.optimizer.dict_bdot(nat_grads, self.optimizer.step(grads=nat_grads, inverse=False))
-                #inv_ray = self_nak.diagonal() / nat_ntk.diagonal()
-
-                #hess_grads = self.optimizer.step(grads=grads, inverse=False)
-                #nat_dots = self.optimizer.dict_bdot(nat_grads, nat_grads)
-                #self_nak = self.optimizer.dict_bdot(grads, nat_grads)
-                #nat_dot = self.optimizer.dict_bdot(nat_grads, nat_grads)
 
                 del grads
                 del fjac
                 gc.collect()
                 torch.cuda.empty_cache()
 
-
-                #print(self.optimizer.dict_bdot(grads, grads).diagonal())
-                #nat_grads = self.optimizer.step(grads=grads, inverse=self.inverse)
-                #self_nak = self.optimizer.dict_bdot(grads, nat_grads)
-                #sq_nak = self.optimizer.dict_bdot(nat_grads, nat_grads)
-                #grad_dot = self.optimizer.dict_bdot(grads, grads)
-                #nat_dot = self.optimizer.dict_bdot(nat_grads, nat_grads)
-
-                #inv_rayleigh = self_nak.diagonal() / ntk.diagonal()
-                #harmr = nat_dot.diagonal() / self_nak.diagonal()
-
-                #rayleigh = self_nak.diagonal() / grad_dot.diagonal()
-                #cos = self_nak.diagonal() / (torch.sqrt(grad_dot.diagonal()) * torch.sqrt(nat_dot.diagonal()))
-                #harmr = nat_dot.diagonal() / self_nak.diagonal()
-
-                conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
-                import ipdb; ipdb.set_trace()
-                #conf.append(-self_nak.diagonal().sum())
-
-                #conf.append((self_nak.diagonal() / ntk.diagonal())[logits.argmax()])
+                if self.relative:
+                    conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
+                else:
+                    conf.append(-self_nak.diagonal().sum())
 
                 def mdl(weight):
                     if self.left_output == 'softmax':
