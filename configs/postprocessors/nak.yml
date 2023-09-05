@@ -13,3 +13,4 @@ postprocessor:
     top_layer: False
     temperature: 1.0
     layer_eps: False
+    relative: False

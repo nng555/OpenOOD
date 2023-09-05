@@ -40,6 +40,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.top_layer = self.args.top_layer
         self.layer_eps = self.args.layer_eps
         self.temperature = self.args.temperature
+        self.relative = self.args.relative
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
@@ -303,7 +304,10 @@ class NAKPostprocessor(BasePostprocessor):
             probs = F.softmax(logits, -1)
             #conf.append(nak_dist.max())
             #conf.append(self_nak.diagonal().mean())
-            conf.append(-self_nak.diagonal().mean())
+            if self.relative:
+                conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
+            else:
+                conf.append(-self_nak.diagonal().sum())
 
             #conf.append(-self_nak.diagonal()[label] + probs[label] * self_nak.diagonal().sum())
 
