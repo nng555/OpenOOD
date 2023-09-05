@@ -46,6 +46,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.sum_labels = self.args.sum_labels
         self.inverse = self.args.inverse
         self.max_examples = self.args.max_examples
+        self.normalize = self.args.normalize
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
@@ -102,6 +103,10 @@ class NAKPostprocessor(BasePostprocessor):
                     labels = torch.multinomial(probs.detach(), 1).squeeze()
                     loss = F.cross_entropy(logits, labels)
                     loss.backward()
+                    if self.avg_grad is None:
+                        self.avg_grad = {p: p.grad.data / self.maxiter for p in net.parameters()}
+                    else:
+                        self.avg_grad = {p: p.grad.data / self.maxiter + self.avg_grad[p] for p in net.parameters()}
 
             # manually compute KFE
             eigens = []
@@ -115,9 +120,9 @@ class NAKPostprocessor(BasePostprocessor):
                 state = self.optimizer.state[weight]
                 # Update convariances and inverses
                 if group['layer_type'] == 'BatchNorm2d':
-                    eigens.append(self.optimizer._update_diagonal(group, state))
+                    eigens.append(self.optimizer._update_diagonal(group, state, normalize=self.normalize))
                 else:
-                    eigens.append(self.optimizer._compute_kfe(group, state))
+                    eigens.append(self.optimizer._compute_kfe(group, state, normalize=self.normalize))
 
             self.optimizer.__del__()
 
@@ -222,7 +227,7 @@ class NAKPostprocessor(BasePostprocessor):
         return logits
 
     def energy(self, logits):
-        return -torch.logsumexp(logits, dim=-1)
+        return torch.exp(logits)
 
     def regret(self, logits):
         return logits + self.energy(logits)
@@ -456,8 +461,9 @@ class NAKPostprocessor(BasePostprocessor):
                 #cos = self_nak.diagonal() / (torch.sqrt(grad_dot.diagonal()) * torch.sqrt(nat_dot.diagonal()))
                 #harmr = nat_dot.diagonal() / self_nak.diagonal()
 
-                #conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
-                conf.append(-self_nak.diagonal().sum())
+                conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
+                import ipdb; ipdb.set_trace()
+                #conf.append(-self_nak.diagonal().sum())
 
                 #conf.append((self_nak.diagonal() / ntk.diagonal())[logits.argmax()])
 
@@ -766,10 +772,14 @@ class EKFAC(Optimizer):
 
         return res
 
-    def _update_diagonal(self, group, state):
+    def _update_diagonal(self, group, state, normalize=False):
         mod = group['mod']
         x = self.state[group['mod']]['x']
         gy = self.state[group['mod']]['gy']
+
+        if normalize:
+            x -= x.mean()
+            gy -= gy.mean()
 
         # full gradients for shift/scale layer average across batch
         # sum (not mean right??) across spatial dimensions
@@ -785,7 +795,7 @@ class EKFAC(Optimizer):
         print(f"Max Eigenvalue: {gw.max()}, Min Eigenvalue: {gw.min()}, Mean Eigenvalue: {gw.mean()}")
         return torch.cat((gw.flatten(), gb.flatten()))
 
-    def _compute_kfe(self, group, state):
+    def _compute_kfe(self, group, state, normalize=False):
         """Computes the covariances."""
         mod = group['mod']
         x = self.state[group['mod']]['x']
@@ -802,6 +812,10 @@ class EKFAC(Optimizer):
         if mod.bias is not None:
             ones = torch.ones_like(x[:1])
             x = torch.cat([x, ones], dim=0)
+
+        if normalize:
+            x -= x.mean()
+
         xxt = torch.mm(x, x.t()) / float(x.shape[1])
         xxt = xxt.to(torch.device('cuda:0'))
         Ex, state['kfe_x'] = torch.linalg.eigh(xxt.cpu(), UPLO='U')
@@ -815,6 +829,10 @@ class EKFAC(Optimizer):
         else:
             gy = gy.data.t()
             state['num_locations'] = 1
+
+        if normalize:
+            gy -= gy.mean()
+
         ggt = torch.mm(gy, gy.t()) / float(gy.shape[1])
         ggt = ggt.to(torch.device('cuda:0'))
         Eg, state['kfe_gy'] = torch.linalg.eigh(ggt, UPLO='U')

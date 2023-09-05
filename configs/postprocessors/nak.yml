@@ -18,3 +18,4 @@ postprocessor:
     temperature: 1.0
     layer_eps: False
     eps_type: mean
+    normalize: False
