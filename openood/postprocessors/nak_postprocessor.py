@@ -236,11 +236,23 @@ class NAKPostprocessor(BasePostprocessor):
     def brier(self, logits):
         return ((torch.eye(logits.shape[0]).to(logits.device) - F.softmax(logits, dim=-1))**2).sum(-1)
 
+    def softlogits(self, logits):
+        probs = F.softmax(logits, -1).detach()
+        return probs * logits
+
+    def softloss(self, logits):
+        probs = F.softmax(logits, -1).detach()
+        return -F.log_softmax(logits / self.temperature, dim=-1) * probs
+
     def get_link_fn(self, lname):
         if lname == 'loss':
             return self.loss
         elif lname == 'softmax':
             return self.softmax
+        elif lname == 'softlogits':
+            return self.softlogits
+        elif lname == 'softloss':
+            return self.softloss
         elif lname == 'logits':
             return self.identity
         elif lname == 'energy':
@@ -268,17 +280,22 @@ class NAKPostprocessor(BasePostprocessor):
                 torch.sum(logits).backward(retain_graph=retain_graph)
             else:
                 logits[0][logits.argmax()].backward(retain_graph=retain_graph)
+        elif link == 'softlogits':
+            probs = F.softmax(logits, -1).detach()
+            if sum_labels:
+                (logits * probs).sum().backward(retain_graph=retain_graph)
+            else:
+                (logits[0][logits.argmax()] * probs[0][logits.argmax()]).backward(retain_graph=retain_graph)
 
     @torch.no_grad()
     def postprocess(self, net: nn.Module, data: Any):
-        pred = []
         conf = []
 
-        if not self.all_classes:
-            data = data.cuda()
-            logits = net.forward(data)
-            pred = torch.argmax(logits, -1)
+        data = data.cuda()
+        logits, features = net.forward(data, return_feature=True)
+        pred = torch.argmax(logits, -1)
 
+        if not self.all_classes:
             for idv_batch in data:
                 with torch.enable_grad():
                     net.zero_grad()
@@ -292,6 +309,8 @@ class NAKPostprocessor(BasePostprocessor):
                     self.backward_link(self.right_output, logits, retain_graph=True, sum_labels=True)
 
                     right_grads = {p: p.grad.data for p in net.parameters()}
+                    if self.normalize:
+                        right_grads = {p: g - self.avg_grad[p] for p, g in right_grads.items()}
                     self.optimizer.step(inverse=self.inverse)
                     right_nat_grads = {p: p.grad.data for p in net.parameters()}
 
@@ -303,8 +322,10 @@ class NAKPostprocessor(BasePostprocessor):
                     else:
                         self.backward_link(self.left_output, logits, retain_graph=True, sum_labels=False)
                         left_grads = {p: p.grad.data for p in net.parameters()}
+                        left_grads = {p: g - self.avg_grad[p] for p, g in left_grads.items()}
                     sum_nak = self.optimizer.dict_dot(left_grads, right_nat_grads)
 
+                    import ipdb; ipdb.set_trace()
                     if not self.relative:
                         conf.append(-sum_nak)
                         continue
@@ -330,43 +351,6 @@ class NAKPostprocessor(BasePostprocessor):
 
                     conf.append(-max_nak / sum_nak)
         else:
-            pred = []
-            conf = []
-
-
-            #conf.append(-self_nak.diagonal()[label] + probs[label] * self_nak.diagonal().sum())
-
-            #conf.append(nak.diagonal()[label.item()] / nak.diagonal().sum())
-
-            def mdl(weight):
-                if self.left_output == 'softmax':
-                    if weight == None:
-                        time = (1 - F.softmax(logits)) / self_nak.diagonal()
-                        mle_probs = F.softmax(logits) - self_nak.diagonal() * time.min()
-                    else:
-                        mle_probs = F.softmax(logits) - self_nak.diagonal() / weight
-                elif self.left_output == 'logits':
-                    mle_probs = F.softmax(logits - self_nak.t() / weight, -1).diagonal()
-                mdl_probs = mle_probs / mle_probs.sum()
-                return mdl_probs, mle_probs, torch.log(mle_probs.sum())
-            #conf.append(self_nak.diagonal() @ F.softmax(logits, -1))
-            #conf.append((self_nak @ F.softmax(logits, -1)).sum())
-
-            #mdl_probs, mle_probs, regret = mdl(self.mdl_weight)
-            #conf.append(-regret)
-            #conf.append(self_nak.sum(0).min() / self_nak.sum())
-
-
-            #mdl_grad = jacrev(mdl)(torch.tensor(float(self.mdl_weight)))
-            #regret = torch.log(mdl) - torch.log(F.softmax(logits))
-            #mdl_regret = torch.log(mle_probs) - torch.log(mdl)
-            #print(mdl.max() - F.softmax(logits).max())
-            #mdl_probs, regret = mdl(self.mdl_weight)
-            #time = (1 - F.softmax(logits)) / nak.diagonal()
-            #conf.append(((1 - F.softmax(logits)) / nak.diagonal())[label.item()])
-            #conf.append(regret.mean())
-            #if F.softmax(logits).max() < 0.8:
-            #    import ipdb; ipdb.set_trace()
 
             if self.top_layer:
                 func, params, buffers = make_functional_with_buffers(net.fc)
@@ -412,6 +396,7 @@ class NAKPostprocessor(BasePostprocessor):
                 del fjac
                 gc.collect()
                 torch.cuda.empty_cache()
+                import ipdb; ipdb.set_trace()
 
                 if self.relative:
                     conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
