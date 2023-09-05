@@ -1,0 +1,29 @@
+defaults:
+  - _self_
+  - override hydra/launcher: slurm
+
+tags: ~
+damping: ~
+left_output: ~
+right_output: ~
+command: ~
+
+hydra:
+##### SUGGESTED HYDRA CONFIG ###########################
+  sweep: 
+    # subdir is built dynamically using the tags
+    dir: ${oc.env:HOME}/slurm/${oc.select:hydra.launcher.date,${now:%Y-%m-%d}}/${hydra.job.name}
+  run:
+    # once we're running set tags from conf
+    dir: ${hydra.sweep.dir}/${join:${tags}}
+  launcher:
+    cpus_per_task: 4
+    job_name: ${hydra.job.name}
+    mem: 25G
+    env_type: venv
+    env_name: pkvb
+    gres: gpu:1
+    exclude: gpu012,gpu166,gpu125,gpu052
+    partition: "a40,rtx6000,t4v2"
+    symlink_dir: /checkpoint/nng
+########################################################
