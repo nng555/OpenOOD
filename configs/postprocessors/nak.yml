@@ -4,13 +4,18 @@ postprocessor:
   skip_id: False
   postprocessor_args:
     damping: 0.1
+    all_classes: True
     maxiter: 10
-    left_output: loss
+    max_examples: 500
+    inverse: True
+    left_output: logits
     strat: min
     right_output: loss
+    sum_labels: False
     topk: 10
     mdl_weight: 0
     top_layer: False
     temperature: 1.0
     layer_eps: False
     relative: False
+    eps_type: mean
