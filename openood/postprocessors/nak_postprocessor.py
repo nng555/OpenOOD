@@ -412,9 +412,12 @@ class NAKPostprocessor(BasePostprocessor):
                 elif self.sample == 0:
                     conf.append(-self_nak.diagonal().sum())
                 else:
-                    samples = torch.multinomial(probs.detach(), self.sample).squeeze()
+                    probs = F.softmax(logits)
+                    samples = torch.multinomial(probs.detach(), self.sample, replacement=True).squeeze()
                     res = -self_nak.diagonal()[samples].mean()
                     conf.append(res)
+
+                import ipdb; ipdb.set_trace()
                 """
                 if self.relative:
                     conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
