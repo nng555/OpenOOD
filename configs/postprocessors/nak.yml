@@ -22,3 +22,4 @@ postprocessor:
     relative: False
     eps_type: mean
     normalize: False
+    total_eps: False

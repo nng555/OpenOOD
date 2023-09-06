@@ -50,6 +50,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.normalize = self.args.normalize
         self.sample = self.args.sample
         self.topp = self.args.topp
+        self.total_eps = self.args.total_eps
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
@@ -126,6 +127,17 @@ class NAKPostprocessor(BasePostprocessor):
                     eigens.append(self.optimizer._update_diagonal(group, state, normalize=self.normalize))
                 else:
                     eigens.append(self.optimizer._compute_kfe(group, state, normalize=self.normalize))
+
+            eigens = torch.cat(eigens)
+            print(f"Max Eigenvalue: {eigens.max()}, Min Eigenvalue: {eigens.min()}, Mean Eigenvalue: {eigens.mean()}")
+            if self.total_eps:
+                assert not self.layer_eps, "Can't set both layer and total damping"
+                min_nonzero_ev = torch.min(eigens[eigens != 0])
+                if min_nonzero_ev < 0:
+                    self.optimizer.eps = (1 + self.optimizer.eps) * torch.abs(min_nonzero_ev)
+                else:
+                    self.optimizer.eps = self.optimizer.eps * min_nonzero_ev
+                print(f"Setting new damping value to {self.optimizer.eps}")
 
             self.optimizer.__del__()
 
@@ -410,9 +422,18 @@ class NAKPostprocessor(BasePostprocessor):
                     else:
                         conf.append(-self_nak.diagonal() @ F.softmax(logits))
                 elif self.sample == 0:
-                    conf.append(-self_nak.diagonal().sum())
+                    if self.topp < 1:
+                        probs = F.softmax(logits)
+                        sort_probs, sort_idxs = torch.sort(probs, descending=True)
+                        cum_probs = torch.cumsum(sort_probs, dim=-1)
+                        top_idxs = sort_idxs[:(cum_probs < self.topp).sum() + 1]
+                        res = -self_nak.diagonal()[top_idxs].mean()
+                        conf.append(res)
+                    else:
+                        conf.append(-self_nak.diagonal().mean())
                 else:
-                    samples = torch.multinomial(probs.detach(), self.sample).squeeze()
+                    probs = F.softmax(logits)
+                    samples = torch.multinomial(probs.detach(), self.sample, replacement=True).squeeze()
                     res = -self_nak.diagonal()[samples].mean()
                     conf.append(res)
                 """
