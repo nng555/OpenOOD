@@ -400,7 +400,7 @@ class NAKPostprocessor(BasePostprocessor):
 
                 if self.sample == -1:
                     if self.topp < 1:
-                        probs = F.softmax(logits)[0]
+                        probs = F.softmax(logits)
                         sort_probs, sort_idxs = torch.sort(probs, descending=True)
                         cum_probs = torch.cumsum(sort_probs, dim=-1)
                         top_idxs = sort_idxs[:(cum_probs < self.topp).sum() + 1]
