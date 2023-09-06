@@ -48,6 +48,8 @@ class NAKPostprocessor(BasePostprocessor):
         self.inverse = self.args.inverse
         self.max_examples = self.args.max_examples
         self.normalize = self.args.normalize
+        self.sample = self.args.sample
+        self.topp = self.args.topp
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
@@ -325,7 +327,6 @@ class NAKPostprocessor(BasePostprocessor):
                         left_grads = {p: g - self.avg_grad[p] for p, g in left_grads.items()}
                     sum_nak = self.optimizer.dict_dot(left_grads, right_nat_grads)
 
-                    import ipdb; ipdb.set_trace()
                     if not self.relative:
                         conf.append(-sum_nak)
                         continue
@@ -396,12 +397,30 @@ class NAKPostprocessor(BasePostprocessor):
                 del fjac
                 gc.collect()
                 torch.cuda.empty_cache()
-                import ipdb; ipdb.set_trace()
 
+                if self.sample == -1:
+                    if self.topp < 1:
+                        probs = F.softmax(logits)[0]
+                        sort_probs, sort_idxs = torch.sort(probs, descending=True)
+                        cum_probs = torch.cumsum(sort_probs, dim=-1)
+                        top_idxs = sort_idxs[:(cum_probs < self.topp).sum() + 1]
+                        res = -self_nak.diagonal()[top_idxs] @ probs[top_idxs]
+                        res /= probs[top_idxs].sum()
+                        conf.append(res)
+                    else:
+                        conf.append(-self_nak.diagonal() @ F.softmax(logits))
+                elif self.sample == 0:
+                    conf.append(-self_nak.diagonal().sum())
+                else:
+                    samples = torch.multinomial(probs.detach(), self.sample).squeeze()
+                    res = -self_nak.diagonal()[samples].mean()
+                    conf.append(res)
+                """
                 if self.relative:
                     conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
                 else:
                     conf.append(-self_nak.diagonal().sum())
+                """
 
                 def mdl(weight):
                     if self.left_output == 'softmax':

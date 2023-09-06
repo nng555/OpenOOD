@@ -17,6 +17,8 @@ postprocessor:
     top_layer: False
     temperature: 1.0
     layer_eps: False
+    sample: -1
+    topp: 1.0
     relative: False
     eps_type: mean
     normalize: False

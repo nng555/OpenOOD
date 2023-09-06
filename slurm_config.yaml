@@ -8,6 +8,8 @@ left_output: ~
 right_output: ~
 command: ~
 relative: ~
+topp: ~
+sample: ~
 
 hydra:
 ##### SUGGESTED HYDRA CONFIG ###########################
