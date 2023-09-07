@@ -419,8 +419,6 @@ class NAKPostprocessor(BasePostprocessor):
                     self_nak = torch.einsum('ol,lr -> or', lgrad, self_nak)
                 """
 
-                import ipdb; ipdb.set_trace()
-
                 del grads
                 del fjac
                 gc.collect()
