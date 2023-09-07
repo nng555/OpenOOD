@@ -383,6 +383,7 @@ class NAKPostprocessor(BasePostprocessor):
                 self.optimizer.zero_grad()
 
                 with torch.enable_grad():
+                    """
                     if self.top_layer:
                         fjac = jacrev(func)(params, buffers, idv_feature.unsqueeze(0))
                         grads = {p: j[0] for p, j in zip(net.fc.parameters(), fjac)}
@@ -397,7 +398,6 @@ class NAKPostprocessor(BasePostprocessor):
                     elif self.right_output == 'loss':
                         fjac = jacrev(lambda p, b, d: -F.log_softmax(func(p, b, d), -1))(params, buffers, idv_batch.unsqueeze(0))
                     grads = {p: j[0] for p, j in zip(net.parameters(), fjac)}
-                    """
                     # TODO: maybe handle the non-transformed grads?
 
                 if self.normalize:
@@ -405,7 +405,9 @@ class NAKPostprocessor(BasePostprocessor):
 
                 nat_grads = self.optimizer.step(grads=grads, inverse=True)
                 self_nak = self.optimizer.dict_bdot(grads, nat_grads)
+                grad_dots = self.optimizer.dict_bdot(grads, grads)
 
+                """
                 if self.right_output != 'logits':
                     right_link = self.get_link_fn(self.right_output)
                     rgrad = jacrev(right_link)(logits).squeeze()
@@ -415,6 +417,9 @@ class NAKPostprocessor(BasePostprocessor):
                     left_link = self.get_link_fn(self.left_output)
                     lgrad = jacrev(left_link)(logits).squeeze()
                     self_nak = torch.einsum('ol,lr -> or', lgrad, self_nak)
+                """
+
+                import ipdb; ipdb.set_trace()
 
                 del grads
                 del fjac
@@ -448,7 +453,6 @@ class NAKPostprocessor(BasePostprocessor):
                     res = -self_nak.diagonal()[samples].mean()
                     conf.append(res)
 
-                import ipdb; ipdb.set_trace()
                 """
                 if self.relative:
                     conf.append(-self_nak.diagonal()[logits.argmax()] / self_nak.diagonal().sum())
