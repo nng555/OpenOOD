@@ -76,6 +76,7 @@ class NAKPostprocessor(BasePostprocessor):
             )
 
         if not self.setup_flag:
+
             if self.top_layer:
                 self.numel = np.sum([p.numel() for p in fc.parameters()])
                 self.optimizer.init_hooks(fc, True)
@@ -105,7 +106,7 @@ class NAKPostprocessor(BasePostprocessor):
                     logits = net(data)
                     probs = F.softmax(logits, -1)
                     labels = torch.multinomial(probs.detach(), 1).squeeze()
-                    loss = F.cross_entropy(logits, labels)
+                    loss = F.cross_entropy(logits / self.temperature, labels)
                     loss.backward()
                     if self.avg_grad is None:
                         self.avg_grad = {p: p.grad.data / self.maxiter for p in net.parameters()}
@@ -396,8 +397,9 @@ class NAKPostprocessor(BasePostprocessor):
                     elif self.right_output == 'softmax':
                         fjac = jacrev(lambda p, b, d: F.softmax(func(p, b, d), -1))(params, buffers, idv_batch.unsqueeze(0))
                     elif self.right_output == 'loss':
-                        fjac = jacrev(lambda p, b, d: -F.log_softmax(func(p, b, d), -1))(params, buffers, idv_batch.unsqueeze(0))
+                        fjac = jacrev(lambda p, b, d: -F.log_softmax(func(p, b, d) / self.temperature, -1))(params, buffers, idv_batch.unsqueeze(0))
                     grads = {p: j[0] for p, j in zip(net.parameters(), fjac)}
+
                     # TODO: maybe handle the non-transformed grads?
 
                 if self.normalize:

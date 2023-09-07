@@ -5,7 +5,7 @@ postprocessor:
   postprocessor_args:
     damping: 0.1
     all_classes: True
-    maxiter: 20
+    maxiter: 10
     max_examples: 500
     inverse: True
     left_output: logits
