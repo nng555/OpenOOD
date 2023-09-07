@@ -400,7 +400,7 @@ class NAKPostprocessor(BasePostprocessor):
                     """
                     # TODO: maybe handle the non-transformed grads?
 
-                if normalize:
+                if self.normalize:
                     grads = {p: j - self.avg_grad[p] for p, j in grads.items()}
 
                 nat_grads = self.optimizer.step(grads=grads, inverse=True)
@@ -467,8 +467,6 @@ class NAKPostprocessor(BasePostprocessor):
                         mle_probs = F.softmax(logits - self_nak.t() / weight, -1).diagonal()
                     mdl_probs = mle_probs / mle_probs.sum()
                     return mdl_probs, mle_probs, torch.log(mle_probs.sum())
-
-                import ipdb; ipdb.set_trace()
 
         conf = torch.stack(conf).cpu()
         return torch.Tensor(pred), torch.Tensor(conf)
