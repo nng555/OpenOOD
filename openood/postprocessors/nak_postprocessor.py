@@ -124,9 +124,9 @@ class NAKPostprocessor(BasePostprocessor):
                 state = self.optimizer.state[weight]
                 # Update convariances and inverses
                 if group['layer_type'] == 'BatchNorm2d':
-                    eigens.append(self.optimizer._update_diagonal(group, state, normalize=self.normalize))
+                    eigens.append(self.optimizer._update_diagonal(group, state))
                 else:
-                    eigens.append(self.optimizer._compute_kfe(group, state, normalize=self.normalize))
+                    eigens.append(self.optimizer._compute_kfe(group, state))
 
             eigens = torch.cat(eigens)
             print(f"Max Eigenvalue: {eigens.max()}, Min Eigenvalue: {eigens.min()}, Mean Eigenvalue: {eigens.mean()}")
@@ -138,6 +138,14 @@ class NAKPostprocessor(BasePostprocessor):
                 else:
                     self.optimizer.eps = self.optimizer.eps * min_nonzero_ev
                 print(f"Setting new damping value to {self.optimizer.eps}")
+
+            if self.eps_type == 'replace':
+                nreplace = (eigens < self.optimizer.eps).sum() / len(eigens)
+                print(f"Replacing {torch.round(nreplace * 100, decimals=2)}% of eigenvalues with {self.optimizer.eps}")
+            elif self.eps_type == 'abs_replace':
+                nabs = (eigens < 0).sum() / len(eigens)
+                nreplace = (eigens == 0).sum() / len(eigens)
+                print(f"{torch.round(nabs * 100, decimals=2)}% of eigenvalues turned positive, {torch.round(nreplace * 100, decimals=2)}% of eigenvalues replaced with {self.optimizer.eps}")
 
             self.optimizer.__del__()
 
@@ -392,6 +400,9 @@ class NAKPostprocessor(BasePostprocessor):
                     """
                     # TODO: maybe handle the non-transformed grads?
 
+                if normalize:
+                    grads = {p: j - self.avg_grad[p] for p, j in grads.items()}
+
                 nat_grads = self.optimizer.step(grads=grads, inverse=True)
                 self_nak = self.optimizer.dict_bdot(grads, nat_grads)
 
@@ -454,6 +465,8 @@ class NAKPostprocessor(BasePostprocessor):
                         mle_probs = F.softmax(logits - self_nak.t() / weight, -1).diagonal()
                     mdl_probs = mle_probs / mle_probs.sum()
                     return mdl_probs, mle_probs, torch.log(mle_probs.sum())
+
+                import ipdb; ipdb.set_trace()
 
         conf = torch.stack(conf).cpu()
         return torch.Tensor(pred), torch.Tensor(conf)
@@ -622,7 +635,15 @@ class EKFAC(Optimizer):
 
         #m2 = m2.add(g_kfe**2)
         # layerwise multiplicative damping
-        eps = self.get_eps(m2)
+        if self.eps_type == 'replace':
+            m2[m2 < self.eps] = self.eps
+            eps = 0
+        elif self.eps_type == 'abs_replace':
+            m2 = torch.abs(m2)
+            m2[m2 == 0] = self.eps
+            eps = 0
+        else:
+            eps = self.get_eps(m2)
 
         if inverse:
             g_nat_kfe = g_kfe / (m2 + eps)
@@ -670,7 +691,15 @@ class EKFAC(Optimizer):
         #m2 = m2.add(g_kfe**2)
 
         # layerwise multiplicative damping
-        eps = self.get_eps(m2)
+        if self.eps_type == 'replace':
+            m2[m2 < self.eps] = self.eps
+            eps = 0
+        elif self.eps_type == 'abs_replace':
+            m2 = torch.abs(m2)
+            m2[m2 == 0] = self.eps
+            eps = 0
+        else:
+            eps = self.get_eps(m2)
 
         if inverse:
             g_nat_kfe = g_kfe / (m2 + eps)
@@ -714,7 +743,15 @@ class EKFAC(Optimizer):
         if g is None:
             g = weight.grad.data.unsqueeze(0)
         fw = state['exact_fw']
-        eps = self.get_eps(fw)
+        if self.eps_type == 'replace':
+            fw[fw < self.eps] = self.eps
+            eps = 0
+        elif self.eps_type == 'abs_replace':
+            fw = torch.abs(fw)
+            fw[fw == 0] = self.eps
+            eps = 0
+        else:
+            eps = self.get_eps(fw)
 
         if inverse:
             g_nat = g / (fw + eps)
@@ -725,7 +762,15 @@ class EKFAC(Optimizer):
             if gb is None:
                 gb = bias.grad.data.unsqueeze(0)
             fb = state['exact_fb']
-            eps = self.get_eps(fb)
+            if self.eps_type == 'replace':
+                fb[fb < self.eps] = self.eps
+                eps = 0
+            elif self.eps_type == 'abs_replace':
+                fb = torch.abs(fb)
+                fb[fb == 0] = self.eps
+                eps = 0
+            else:
+                eps = self.get_eps(fb)
 
             if inverse:
                 gb_nat = gb / (fb + eps)
@@ -748,14 +793,10 @@ class EKFAC(Optimizer):
 
         return res
 
-    def _update_diagonal(self, group, state, normalize=False):
+    def _update_diagonal(self, group, state):
         mod = group['mod']
         x = self.state[group['mod']]['x']
         gy = self.state[group['mod']]['gy']
-
-        if normalize:
-            x -= x.mean()
-            gy -= gy.mean()
 
         # full gradients for shift/scale layer average across batch
         # sum (not mean right??) across spatial dimensions
@@ -771,7 +812,7 @@ class EKFAC(Optimizer):
         print(f"Max Eigenvalue: {gw.max()}, Min Eigenvalue: {gw.min()}, Mean Eigenvalue: {gw.mean()}")
         return torch.cat((gw.flatten(), gb.flatten()))
 
-    def _compute_kfe(self, group, state, normalize=False):
+    def _compute_kfe(self, group, state):
         """Computes the covariances."""
         mod = group['mod']
         x = self.state[group['mod']]['x']
@@ -789,9 +830,6 @@ class EKFAC(Optimizer):
             ones = torch.ones_like(x[:1])
             x = torch.cat([x, ones], dim=0)
 
-        if normalize:
-            x -= x.mean()
-
         xxt = torch.mm(x, x.t()) / float(x.shape[1])
         xxt = xxt.to(torch.device('cuda:0'))
         Ex, state['kfe_x'] = torch.linalg.eigh(xxt.cpu(), UPLO='U')
@@ -805,9 +843,6 @@ class EKFAC(Optimizer):
         else:
             gy = gy.data.t()
             state['num_locations'] = 1
-
-        if normalize:
-            gy -= gy.mean()
 
         ggt = torch.mm(gy, gy.t()) / float(gy.shape[1])
         ggt = ggt.to(torch.device('cuda:0'))
