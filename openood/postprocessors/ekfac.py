@@ -106,11 +106,11 @@ class EKFAC(Optimizer):
 
     def _save_input(self, mod, i):
         """Saves input of layer to compute covariance."""
-        self.state[mod]['x'] = i[0]
+        self.state[mod]['x'] = i[0].detach()
 
     def _save_grad_output(self, mod, grad_input, grad_output):
         """Saves grad on output of layer to compute covariance."""
-        self.state[mod]['gy'] = grad_output[0] * grad_output[0].size(0)
+        self.state[mod]['gy'] = grad_output[0].detach() * grad_output[0].size(0)
 
     def get_eps(self, eigens):
         if self.layer_eps:

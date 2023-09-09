@@ -14,7 +14,7 @@ from .base_postprocessor import BasePostprocessor
 from .ekfac import EKFAC
 from .info import num_classes_dict
 from functorch import make_functional_with_buffers
-from torch.func import functional_call, vmap, grad, jacrev
+from torch.func import functional_call, vmap, grad, jacrev, replace_all_batch_norm_modules_
 from torch.func import grad
 
 class NAKPostprocessor(BasePostprocessor):
@@ -38,8 +38,14 @@ class NAKPostprocessor(BasePostprocessor):
         self.sum_labels = self.args.sum_labels
         self.total_eps = self.args.total_eps
         self.state_path = self.args.state_path
+        self.vmap_chunk_size = self.args.vmap_chunk_size
+        if self.vmap_chunk_size == -1:
+            self.vmap_chunk_size = None
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
+
+        # running stats messes up vmap
+        replace_all_batch_norm_modules_(net)
 
         self.optimizer = EKFAC(
             net,
@@ -92,7 +98,10 @@ class NAKPostprocessor(BasePostprocessor):
                 # update eigenbasis
                 self.optimizer.average_state(self.eigen_iter)
                 self.optimizer.compute_basis()
+
+                # clean up optimizer
                 self.optimizer.clear_hooks()
+                self.optimizer.clear_cache()
                 self.optimizer.zero_grad()
                 net.zero_grad()
 
@@ -103,26 +112,31 @@ class NAKPostprocessor(BasePostprocessor):
                     probs = F.softmax(logits / self.temperature, -1)
                     label = F.one_hot(torch.multinomial(probs.detach(), 1).squeeze(), self.num_classes)
                     grads = grad(lambda p, b, d: (-F.log_softmax(func(p, b, d) / self.temperature, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
-                    grads = {p: g for p, g in zip(net.parameters(), grads)}
-                    return grads
+                    grads = {p: g.unsqueeze(0) for p, g in zip(net.parameters(), grads)}
+                    self.optimizer.update_moments(grads=grads)
+                    return torch.tensor(1)
 
-                vmap_moments = vmap(moments_single, in_dims=(0, 0), randomness='different')
+                vmap_moments = vmap(
+                    moments_single,
+                    in_dims=(0, 0),
+                    randomness='different',
+                    chunk_size=self.vmap_chunk_size,
+                )
 
                 # fit second moments in eigenbasis
                 nexamples = 0
-                with torch.enable_grad():
-                    for i, batch in enumerate(tqdm(id_loader_dict['train'],
-                                                   desc="EKFAC Moments: ",
-                                                   position=0,
-                                                   leave=True,
-                                                   total=self.moments_iter)):
-                        if i == self.moments_iter:
-                            break
-                        nexamples += len(data)
-                        data = batch['data'].cuda()
-                        logits = net(data)
-                        grads = vmap_moments(data, logits)
-                        self.optimizer.update_moments(grads=grads)
+                for i, batch in enumerate(tqdm(id_loader_dict['train'],
+                                               desc="EKFAC Moments: ",
+                                               position=0,
+                                               leave=True,
+                                               total=self.moments_iter)):
+                    if i == self.moments_iter:
+                        break
+                    nexamples += len(data)
+                    data = batch['data'].cuda()
+                    logits = net(data)
+                    vmap_moments(data, logits)
+                    #self.optimizer.update_moments(grads=grads)
 
                 del grads
                 gc.collect()
