@@ -9,6 +9,7 @@ postprocessor:
     moments_iter: -1
     state_path: None
     left_output: logits
+    vmap_chunk_size: -1
     strat: min
     right_output: loss
     sum_labels: False
