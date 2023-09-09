@@ -29,6 +29,6 @@ hydra:
     env_name: pkvb
     gres: gpu:1
     exclude: gpu012,gpu166,gpu125,gpu052,gpu150,gpu001
-    partition: "a40"
+    partition: "a40,rtx6000,t4v2"
     symlink_dir: /checkpoint/nng
 ########################################################

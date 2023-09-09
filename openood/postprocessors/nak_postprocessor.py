@@ -13,7 +13,6 @@ from torch.optim.optimizer import Optimizer
 from .base_postprocessor import BasePostprocessor
 from .ekfac import EKFAC
 from .info import num_classes_dict
-from functorch import make_functional_with_buffers
 from torch.func import functional_call, vmap, grad, jacrev, replace_all_batch_norm_modules_
 from torch.func import grad
 
@@ -44,9 +43,6 @@ class NAKPostprocessor(BasePostprocessor):
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
-        # running stats messes up vmap
-        replace_all_batch_norm_modules_(net)
-
         self.optimizer = EKFAC(
             net,
             eps=self.damping,
@@ -56,7 +52,9 @@ class NAKPostprocessor(BasePostprocessor):
         )
 
         if not self.setup_flag:
+            net.eval()
 
+            # running stats messes up vmap
             if self.state_path != "None" and os.path.exists(self.state_path):
                 print(f"Loading EKFAC state from {self.state_path}")
                 self.optimizer.load_state_dict(torch.load(self.state_path))
@@ -106,13 +104,13 @@ class NAKPostprocessor(BasePostprocessor):
                 net.zero_grad()
 
                 # update moments per example
-                func, params, buffers = make_functional_with_buffers(net)
+                params = {k: v.detach() for k, v in net.named_parameters()}
+                buffers = {k: v.detach() for k, v in net.named_buffers()}
 
                 def moments_single(idv_ex, logits):
                     probs = F.softmax(logits / self.temperature, -1)
                     label = F.one_hot(torch.multinomial(probs.detach(), 1).squeeze(), self.num_classes)
-                    grads = grad(lambda p, b, d: (-F.log_softmax(func(p, b, d) / self.temperature, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
-                    grads = {p: g for p, g in zip(net.parameters(), grads)}
+                    grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.temperature, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
                     return grads
 
                 vmap_moments = vmap(
@@ -135,12 +133,15 @@ class NAKPostprocessor(BasePostprocessor):
                     data = batch['data'].cuda()
                     logits = net(data)
                     grads = vmap_moments(data, logits)
+                    grads = {v: grads[k] for k, v in net.named_parameters()}
                     self.optimizer.update_moments(grads=grads)
 
                 self.optimizer.average_moments(nexamples)
                 self.optimizer.clear_cache()
                 gc.collect()
                 torch.cuda.empty_cache()
+                net.zero_grad()
+                self.optimizer.zero_grad()
 
                 if self.state_path != "None":
                     torch.save(self.optimizer.state_dict(), self.state_path)
@@ -158,15 +159,13 @@ class NAKPostprocessor(BasePostprocessor):
         logits, features = net.forward(data, return_feature=True)
         pred = torch.argmax(logits, -1)
 
-        if self.top_layer:
-            func, params, buffers = make_functional_with_buffers(net.fc)
-        else:
-            func, params, buffers = make_functional_with_buffers(net)
+        params = {k: v.detach() for k, v in net.named_parameters()}
+        buffers = {k: v.detach() for k, v in net.named_buffers()}
 
         # helper function for vmapping
         def process_single(idv_ex):
-            fjac = jacrev(lambda p, b, d: -F.log_softmax(func(p, b, d) / self.temperature, -1))(params, buffers, idv_ex.unsqueeze(0))
-            grads = {p: j[0] for p, j in zip(net.parameters(), fjac)}
+            fjac = jacrev(lambda p, b, d: -F.log_softmax(functional_call(net, (p, b), (d,)) / self.temperature, -1))(params, buffers, idv_ex.unsqueeze(0))
+            grads = {v: fjac[k][0] for k, v in net.named_parameters()}
             nat_grads = self.optimizer.step(grads=grads)
             self_nak = self.optimizer.dict_bdot(grads, nat_grads)
             return self_nak.diagonal()

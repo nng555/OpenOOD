@@ -198,10 +198,9 @@ class EKFAC(Optimizer):
                 gb = bias.grad.data.unsqueeze(0)
             gb = gb.view(s[0], -1, 1, 1, 1).expand(-1, -1, -1, s[3], s[4])
             g = torch.cat([g, gb], dim=2)
-        g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
-        #m2 = m2.add(g_kfe**2)
 
-        # layerwise multiplicative damping
+        g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
+
         m2, eps = self.get_m2_and_eps(m2, self.eps)
 
         g_nat_kfe = g_kfe / (m2 + eps)
@@ -397,7 +396,7 @@ class EKFAC(Optimizer):
             g = g.contiguous().view(s[0], s[1], s[2]*s[3]*s[4])
         if len(group['params']) == 2:
             if gb is None:
-                gb = group['params'][1].grad.data
+                gb = group['params'][1].grad.data.unsqueeze(0)
             if isconv and self.sua:
                 gb = gb.view(s[0], -1, 1, 1, 1).expand(-1, -1, -1, s[3], s[4])
                 g = torch.cat([g, gb], dim=2)
