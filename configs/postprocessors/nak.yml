@@ -5,10 +5,9 @@ postprocessor:
   postprocessor_args:
     damping: 0.1
     all_classes: True
-    maxiter: 25
-    sample_temperature: -1
-    max_examples: 500
-    inverse: True
+    eigen_iter: -1
+    moments_iter: -1
+    state_path: None
     left_output: logits
     strat: min
     right_output: loss
