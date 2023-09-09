@@ -1,7 +1,11 @@
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch.optim.optimizer import Optimizer
 
 class EKFAC(Optimizer):
 
-    def __init__(self, net, eps, niters, sua=False, layer_eps=True, eps_type='mean'):
+    def __init__(self, net, eps, sua=False, layer_eps=True, eps_type='mean'):
         """ EKFAC Preconditionner for Linear and Conv2d layers.
 
         Computes the EKFAC of the second moment of the gradients.
@@ -19,7 +23,6 @@ class EKFAC(Optimizer):
         """
         self.eps = eps
         self.sua = sua
-        self.niters = niters
         self.params = []
         self._fwd_handles = []
         self._bwd_handles = []
@@ -44,21 +47,14 @@ class EKFAC(Optimizer):
 
         super(EKFAC, self).__init__(self.params, {})
 
-    def init_hooks(self, net, avg):
-        print("Setting average hooks to " + str(avg))
-        self.__del__()
+    def init_hooks(self, net):
+        self.clear_hooks()
         for mod in net.modules():
             mod_class = mod.__class__.__name__
             if mod_class in ['Linear', 'Conv2d', 'BatchNorm2d']:
-                if avg:
-                    handle = mod.register_forward_pre_hook(self._save_avg_input)
-                else:
-                    handle = mod.register_forward_pre_hook(self._save_input)
+                handle = mod.register_forward_pre_hook(self._save_input)
                 self._fwd_handles.append(handle)
-                if avg:
-                    handle = mod.register_full_backward_hook(self._save_avg_grad_output)
-                else:
-                    handle = mod.register_full_backward_hook(self._save_grad_output)
+                handle = mod.register_full_backward_hook(self._save_grad_output)
                 self._bwd_handles.append(handle)
 
     def step(self, update_stats=True, update_params=True, grads=None):
@@ -72,12 +68,7 @@ class EKFAC(Optimizer):
                 weight = group['params'][0]
                 bias = None
             state = self.state[weight]
-            # Update convariances and inverses
-            #if self._iteration_counter % self.update_freq == 0:
-            #    self._compute_kfe(group, state)
-            # Preconditionning
-            wgrad = None
-            bgrad = None
+            wgrad = bgrad = None
             if grads is not None:
                 wgrad = grads[weight]
                 if bias is not None:
@@ -120,20 +111,6 @@ class EKFAC(Optimizer):
     def _save_grad_output(self, mod, grad_input, grad_output):
         """Saves grad on output of layer to compute covariance."""
         self.state[mod]['gy'] = grad_output[0] * grad_output[0].size(0)
-
-    def _save_avg_input(self, mod, i):
-        """Saves input of layer to compute covariance."""
-        if 'x' not in self.state[mod]:
-            self.state[mod]['x'] = i[0]
-        else:
-            self.state[mod]['x'] = torch.cat((self.state[mod]['x'], i[0]))
-
-    def _save_avg_grad_output(self, mod, grad_input, grad_output):
-        """Saves grad on output of layer to compute covariance."""
-        if 'gy' not in self.state[mod]:
-            self.state[mod]['gy'] = grad_output[0] * grad_output[0].size(0)
-        else:
-            self.state[mod]['gy'] = torch.cat((self.state[mod]['gy'], grad_output[0] * grad_output[0].size(0)))
 
     def get_eps(self, eigens):
         if self.layer_eps:
@@ -281,14 +258,14 @@ class EKFAC(Optimizer):
 
         return res
 
-    def update_cache(self, op, nbatches=1):
+    def update_cache(self, op, nbatches=1, grads=None):
         for group in self.param_groups:
             if len(group['params']) == 2:
                 weight, bias = group['params']
             else:
                 weight = group['params'][0]
                 bias = None
-            state = self.optimizer.state[weight]
+            state = self.state[weight]
             if op == 'average_state':
                 if group['layer_type'] == 'BatchNorm2d':
                     state['exact_fw'] /= nbatches
@@ -301,15 +278,30 @@ class EKFAC(Optimizer):
                     state['m2'] /= nbatches
             elif op == 'state':
                 if group['layer_type'] == 'BatchNorm2d':
-                    self.optimizer._update_diagonal(group, state))
+                    self._update_diagonal(group, state)
                 else:
-                    self.optimizer._compute_block(group, state))
+                    self._update_block(group, state)
             elif op == 'moments':
                 if group['layer_type'] != 'BatchNorm2d':
-                    self.update_block_moments(group, state)
+                    g = gb = None
+                    if grads is not None:
+                        g = grads[weight]
+                        if bias is not None:
+                            gb = grads[bias]
+                    self._update_block_moments(group, state, g=g, gb=gb)
             elif op == 'basis':
                 if group['layer_type'] != "BatchNorm2d":
                     self._compute_block_basis(group, state)
+            elif op == 'print':
+                print(group['mod'])
+                if group['layer_type'] == 'BatchNorm2d':
+                    eigens = state['exact_fw']
+                else:
+                    eigens = state['m2']
+                print(f"Max Eigenvalue: {eigens.max()}, Min Eigenvalue: {eigens.min()}, Mean Eigenvalue: {eigens.mean()}")
+
+    def print_eigens(self):
+        self.update_cache('print')
 
     # 1. accumulate average activation/gradients across batches
     def update_state(self):
@@ -324,28 +316,28 @@ class EKFAC(Optimizer):
         self.update_cache('basis')
 
     # 4. reaccumulate second moments
-    def update_moments(self):
-        self.update_cache('moments')
+    def update_moments(self, grads=None):
+        self.update_cache('moments', grads=grads)
 
     # 5. average second moments
     def average_moments(self, nbatches):
         self.update_cache('average_moments', nbatches)
 
-    def _update_diagonal(self, group, state);
+    def _update_diagonal(self, group, state):
         mod = group['mod']
         x = self.state[group['mod']]['x']
         gy = self.state[group['mod']]['gy']
 
         gw = torch.sum(x * gy, (-1, -2))
         gw = (gw**2).mean(0)
-        if 'exact_fw' in state:
+        if 'exact_fw' not in state:
             state['exact_fw'] = gw
         else:
             state['exact_fw'] += gw
         if mod.bias is not None:
             gb = torch.sum(gy, (-1, -2))
             gb = (gb**2).mean(0)
-            if 'exact_fb' in state:
+            if 'exact_fb' not in state:
                 state['exact_fb'] = gw
             else:
                 state['exact_fb'] += gw
@@ -362,7 +354,8 @@ class EKFAC(Optimizer):
                 x = F.conv2d(x, group['gathering_filter'],
                              stride=mod.stride, padding=mod.padding,
                              groups=mod.in_channels)
-            x = x.data.permute(1, 0, 2, 3).contiguous().view(x.shape[1], -1)
+            #x = x.data.permute(1, 0, 2, 3).contiguous().view(x.shape[1], -1)
+            x = x.data.permute(1, 0, 2, 3).reshape(x.shape[1], -1)
         else:
             x = x.data.t()
         if mod.bias is not None:
@@ -378,7 +371,8 @@ class EKFAC(Optimizer):
         if group['layer_type'] == 'Conv2d':
             gy = gy.data.permute(1, 0, 2, 3)
             state['num_locations'] = gy.shape[2] * gy.shape[3]
-            gy = gy.contiguous().view(gy.shape[0], -1)
+            #gy = gy.contiguous().view(gy.shape[0], -1)
+            gy = gy.reshape(gy.shape[0], -1)
         else:
             gy = gy.data.t()
             state['num_locations'] = 1
@@ -389,52 +383,56 @@ class EKFAC(Optimizer):
         else:
             state['ggt'] += ggt
 
-
-    def _update_block_moments(self, group, state):
+    def _update_block_moments(self, group, state, g=None, gb=None):
         """refit second moments"""
+        # g and gb will have an extra batch dimension!!
+        isconv = group['layer_type'] == 'Conv2d'
         kfe_x = state['kfe_x']
         kfe_gy = state['kfe_gy']
-        g = weight.grad.data
+        if g is None:
+            g = group['params'][0].grad.data.unsqueeze(0)
         s = g.shape
-        #bs = self.state[group['mod']]['x'].size(0)
         mod = group['mod']
-        if group['layer_type'] == 'Conv2d' and sua:
+        if isconv and not self.sua:
             g = g.contiguous().view(s[0], s[1], s[2]*s[3]*s[4])
-        if bias is not None:
-            gb = bias.grad.data
-            if self.sua:
-                gb = gb.view(-1, 1, 1, 1).expand(-1, -1, s[2], s[3])
-            g = torch.cat([g, gb], dim=1)
+        if len(group['params']) == 2:
+            if gb is None:
+                gb = group['params'][1].grad.data
+            if isconv and self.sua:
+                gb = gb.view(s[0], -1, 1, 1, 1).expand(-1, -1, -1, s[3], s[4])
+                g = torch.cat([g, gb], dim=2)
+            else:
+                g = torch.cat([g, gb.view(gb.shape[0], gb.shape[1], 1)], dim=2)
 
-        if self.sua:
+        if isconv and self.sua:
             g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
         else:
             g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
 
         if 'm2' not in state:
-            state['m2'] = g_kfe**2
+            state['m2'] = (g_kfe**2).sum(0)
         else:
-            state['m2'] += g_kfe**2
+            state['m2'] += (g_kfe**2).sum(0)
 
     def _compute_block_basis(self, group, state, skip_m2=True):
         """computes eigendecomposition."""
         xxt = state['xxt']
-        Ex, state['kfe_x'] = torch.linalg.eigh(xxt.cpu(), UPLO='U')
-        Ex = Ex.cuda()
+        _, state['kfe_x'] = torch.linalg.eigh(xxt.cpu(), UPLO='U')
         state['kfe_x'] = state['kfe_x'].cuda()
 
         ggt = state['ggt']
-        Eg, state['kfe_gy'] = torch.linalg.eigh(ggt, UPLO='U')
-        Eg = Eg.cuda()
+        _, state['kfe_gy'] = torch.linalg.eigh(ggt, UPLO='U')
         state['kfe_gy'] = state['kfe_gy'].cuda()
 
+        """
         if not skip_m2:
             state['m2'] = Eg.unsqueeze(1) * Ex.unsqueeze(0) * state['num_locations']
-            print(mod)
-            print(f"Max Eigenvalue: {state['m2'].max()}, Min Eigenvalue: {state['m2'].min()}, Mean Eigenvalue: {state['m2'].mean()}")
+            #print(mod)
+            #print(f"Max Eigenvalue: {state['m2'].max()}, Min Eigenvalue: {state['m2'].min()}, Mean Eigenvalue: {state['m2'].mean()}")
             if group['layer_type'] == 'Conv2d' and self.sua:
                 ws = group['params'][0].grad.data.size()
                 state['m2'] = state['m2'].view(Eg.size(0), Ex.size(0), 1, 1).expand(-1, -1, ws[2], ws[3])
+        """
 
     def _get_gathering_filter(self, mod):
         """Convolution filter that extracts input patches."""
@@ -449,18 +447,27 @@ class EKFAC(Optimizer):
 
     def _to_kfe_sua(self, g, vx, vg):
         """Project g to the kfe"""
+        # NOTE: g includes an extra first dimension for classes
         sg = g.size()
         g = torch.matmul(vg.t(), g.reshape(sg[0], sg[1], -1)).view(sg[0], vg.size(1), sg[2], sg[3], sg[4])
         g = torch.matmul(g.permute(0, 1, 3, 4, 2).contiguous().view(sg[0], -1, sg[2]), vx)
         g = g.view(sg[0], vg.size(1), sg[3], sg[4], vx.size(1)).permute(0, 1, 4, 2, 3)
         return g
 
-    def __del__(self):
+    def clear_hooks(self):
         for handle in self._fwd_handles + self._bwd_handles:
             handle.remove()
         for state in self.state.values():
             if 'x' in state:
-                #import ipdb; ipdb.set_trace()
-                #state['eg'] = state['x'] @ state['gy']
                 del state['x']
                 del state['gy']
+
+    def clear_cache(self):
+        for state in self.state.values():
+            if 'xxt' in state:
+                del state['xxt']
+                del state['ggt']
+
+    def __del__(self):
+        self.clear_hooks()
+        self.clear_cache()
