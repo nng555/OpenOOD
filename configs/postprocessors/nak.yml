@@ -8,7 +8,7 @@ postprocessor:
     eigen_iter: -1
     moments_iter: -1
     state_path: None
-    left_output: logits
+    left_output: loss
     strat: min
     right_output: loss
     sum_labels: False
