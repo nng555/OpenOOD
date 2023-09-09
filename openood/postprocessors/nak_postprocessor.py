@@ -56,7 +56,7 @@ class NAKPostprocessor(BasePostprocessor):
                 self.optimizer.load_state_dict(torch.load(self.state_path))
             else:
                 self.numel = np.sum([p.numel() for p in net.parameters()])
-                self.optimizer.init_hooks(net, False)
+                self.optimizer.init_hooks(net)
 
                 # update over full dataset if not specified
                 if self.eigen_iter == -1:
@@ -88,6 +88,9 @@ class NAKPostprocessor(BasePostprocessor):
                         loss = F.cross_entropy(logits / self.temperature, labels)
                         loss.backward()
                         self.optimizer.update_state()
+
+                        gc.collect()
+                        torch.cuda.empty_cache()
 
                 # update eigenbasis
                 self.optimizer.average_state(self.eigen_iter)
