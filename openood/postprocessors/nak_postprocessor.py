@@ -112,9 +112,8 @@ class NAKPostprocessor(BasePostprocessor):
                     probs = F.softmax(logits / self.temperature, -1)
                     label = F.one_hot(torch.multinomial(probs.detach(), 1).squeeze(), self.num_classes)
                     grads = grad(lambda p, b, d: (-F.log_softmax(func(p, b, d) / self.temperature, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
-                    grads = {p: g.unsqueeze(0) for p, g in zip(net.parameters(), grads)}
-                    self.optimizer.update_moments(grads=grads)
-                    return torch.tensor(1)
+                    grads = {p: g for p, g in zip(net.parameters(), grads)}
+                    return grads
 
                 vmap_moments = vmap(
                     moments_single,
@@ -135,15 +134,13 @@ class NAKPostprocessor(BasePostprocessor):
                     nexamples += len(data)
                     data = batch['data'].cuda()
                     logits = net(data)
-                    vmap_moments(data, logits)
-                    #self.optimizer.update_moments(grads=grads)
-
-                del grads
-                gc.collect()
-                torch.cuda.empty_cache()
+                    grads = vmap_moments(data, logits)
+                    self.optimizer.update_moments(grads=grads)
 
                 self.optimizer.average_moments(nexamples)
                 self.optimizer.clear_cache()
+                gc.collect()
+                torch.cuda.empty_cache()
 
                 if self.state_path != "None":
                     torch.save(self.optimizer.state_dict(), self.state_path)
@@ -174,7 +171,7 @@ class NAKPostprocessor(BasePostprocessor):
             self_nak = self.optimizer.dict_bdot(grads, nat_grads)
             return self_nak.diagonal()
 
-        vmap_process = vmap(process_single, in_dims=(0,))
+        vmap_process = vmap(process_single, in_dims=(0,), chunk_size=self.vmap_chunk_size)
         nak = vmap_process(data)
         conf = torch.sum(-nak * F.softmax(logits, -1), -1)
 

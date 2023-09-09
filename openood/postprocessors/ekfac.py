@@ -403,16 +403,15 @@ class EKFAC(Optimizer):
                 g = torch.cat([g, gb], dim=2)
             else:
                 g = torch.cat([g, gb.view(gb.shape[0], gb.shape[1], 1)], dim=2)
-
         if isconv and self.sua:
             g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
         else:
             g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
 
         if 'm2' not in state:
-            state['m2'] = (g_kfe**2).sum(0)
+            state['m2'] = (g_kfe.detach()**2).sum(0)
         else:
-            state['m2'] += (g_kfe**2).sum(0)
+            state['m2'] += (g_kfe.detach()**2).sum(0)
 
     def _compute_block_basis(self, group, state, skip_m2=True):
         """computes eigendecomposition."""
