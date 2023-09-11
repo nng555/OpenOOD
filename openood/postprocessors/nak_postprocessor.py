@@ -32,14 +32,21 @@ class NAKPostprocessor(BasePostprocessor):
         self.top_layer = self.args.top_layer
         self.layer_eps = self.args.layer_eps
         self.eps_type = self.args.eps_type
-        self.temperature = self.args.temperature
+        self.loss_temp = self.args.loss_temp
+        self.sample_temp = self.args.sample_temp
+        self.fsample_temp = self.args.fsample_temp
+        self.floss_temp = self.args.floss_temp
         self.all_classes = self.args.all_classes
         self.sum_labels = self.args.sum_labels
         self.total_eps = self.args.total_eps
         self.state_path = self.args.state_path
-        self.vmap_chunk_size = self.args.vmap_chunk_size
-        if self.vmap_chunk_size == -1:
-            self.vmap_chunk_size = None
+        self.jac_chunk_size = self.args.jac_chunk_size
+        self.moments_chunk_size = self.args.moments_chunk_size
+        self.topk = self.args.topk
+        if self.jac_chunk_size == -1:
+            self.jac_chunk_size = None
+        if self.moments_chunk_size == -1:
+            self.moments_chunk_size = None
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
@@ -85,13 +92,24 @@ class NAKPostprocessor(BasePostprocessor):
                         net.zero_grad()
                         self.optimizer.zero_grad()
 
-                        # sample labels from model distribution
                         logits = net(data)
-                        probs = F.softmax(logits / self.temperature, -1)
-                        labels = torch.multinomial(probs.detach(), 1).squeeze()
-                        loss = F.cross_entropy(logits / self.temperature, labels)
-                        loss.backward()
-                        self.optimizer.update_state()
+                        probs = F.softmax(logits / self.fsample_temp, -1)
+                        if self.topk == -1:
+                            # sample a single class
+                            labels = torch.multinomial(probs.detach(), 1).squeeze()
+                            loss = F.cross_entropy(logits / self.floss_temp, labels)
+                            loss.backward()
+                            self.optimizer.update_state()
+                        else:
+                            # manually weight topk classes rather than sampling
+                            weights, labels = torch.topk(probs.detach(), self.topk, -1)
+                            weights /= weights.sum(-1)[:, None]
+                            for kcls in range(self.topk):
+                                net.zero_grad()
+                                self.optimizer.zero_grad()
+                                loss = F.cross_entropy(logits / self.floss_temp, labels[:, kcls])
+                                loss.backward(retain_graph=(kcls != self.topk - 1))
+                                self.optimizer.update_state(weights[:, kcls])
 
                 # update eigenbasis
                 self.optimizer.average_state(self.eigen_iter)
@@ -107,17 +125,16 @@ class NAKPostprocessor(BasePostprocessor):
                 params = {k: v.detach() for k, v in net.named_parameters()}
                 buffers = {k: v.detach() for k, v in net.named_buffers()}
 
-                def moments_single(idv_ex, logits):
-                    probs = F.softmax(logits / self.temperature, -1)
-                    label = F.one_hot(torch.multinomial(probs.detach(), 1).squeeze(), self.num_classes)
-                    grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.temperature, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
+                def moments_single(idv_ex, target):
+                    label = F.one_hot(target, self.num_classes)
+                    grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.floss_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
                     return grads
 
                 vmap_moments = vmap(
                     moments_single,
                     in_dims=(0, 0),
                     randomness='different',
-                    chunk_size=self.vmap_chunk_size,
+                    chunk_size=self.moments_chunk_size,
                 )
 
                 # fit second moments in eigenbasis
@@ -132,9 +149,22 @@ class NAKPostprocessor(BasePostprocessor):
                     nexamples += len(data)
                     data = batch['data'].cuda()
                     logits = net(data)
-                    grads = vmap_moments(data, logits)
-                    grads = {v: grads[k] for k, v in net.named_parameters()}
-                    self.optimizer.update_moments(grads=grads)
+                    probs = F.softmax(logits / self.fsample_temp, -1)
+                    if self.topk == -1:
+                        # sample a label
+                        targets = torch.multinomial(probs.detach(), 1).squeeze()
+                        grads = vmap_moments(data, targets)
+                        grads = {v: grads[k] for k, v in net.named_parameters()}
+                        self.optimizer.update_moments(grads)
+                    else:
+                        # manually average over topk classes
+                        weights, idxs = torch.topk(probs.detach(), self.topk, -1)
+                        weights /= weights.sum(-1)[:, None]
+                        for kcls in range(self.topk):
+                            grads = vmap_moments(data, idxs[:, kcls])
+                            grads = {v: grads[k] for k, v in net.named_parameters()}
+                            self.optimizer.update_moments(grads=grads, ex_weight=weights[:, kcls])
+                            del grads
 
                 self.optimizer.average_moments(nexamples)
                 self.optimizer.clear_cache()
@@ -162,17 +192,32 @@ class NAKPostprocessor(BasePostprocessor):
         params = {k: v.detach() for k, v in net.named_parameters()}
         buffers = {k: v.detach() for k, v in net.named_buffers()}
 
+        def grad_single(idv_ex, target):
+            label = F.one_hot(target, self.num_classes)
+            grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.loss_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
+            grads = {v: grads[k].unsqueeze(0) for k, v in net.named_parameters()}
+            nat_grads = self.optimizer.step(grads=grads)
+            self_nak = self.optimizer.dict_dot(grads, nat_grads)
+            return self_nak
+
+        vmap_grad_single = vmap(grad_single, in_dims=(None, 0))
+
+        def process_single_grad(idv_ex):
+            return vmap_grad_single(idv_ex, torch.arange(self.num_classes).cuda())
+
         # helper function for vmapping
-        def process_single(idv_ex):
-            fjac = jacrev(lambda p, b, d: -F.log_softmax(functional_call(net, (p, b), (d,)) / self.temperature, -1))(params, buffers, idv_ex.unsqueeze(0))
+        def process_single_jac(idv_ex):
+            fjac = jacrev(lambda p, b, d: -F.log_softmax(functional_call(net, (p, b), (d,)) / self.loss_temp, -1))(params, buffers, idv_ex.unsqueeze(0))
             grads = {v: fjac[k][0] for k, v in net.named_parameters()}
             nat_grads = self.optimizer.step(grads=grads)
             self_nak = self.optimizer.dict_bdot(grads, nat_grads)
             return self_nak.diagonal()
 
-        vmap_process = vmap(process_single, in_dims=(0,), chunk_size=self.vmap_chunk_size)
-        nak = vmap_process(data)
-        conf = torch.sum(-nak * F.softmax(logits, -1), -1)
+        vmap_jac = vmap(process_single_jac, in_dims=(0,), chunk_size=self.jac_chunk_size)
+        vmap_grad = vmap(process_single_grad, in_dims=(0,), chunk_size=self.jac_chunk_size)
+        #nak = vmap_jac(data)
+        nak = vmap_grad(data)
+        conf = torch.sum(-nak * F.softmax(logits / self.sample_temp, -1), -1)
 
         return pred, conf
 

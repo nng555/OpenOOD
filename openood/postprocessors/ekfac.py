@@ -200,7 +200,6 @@ class EKFAC(Optimizer):
             g = torch.cat([g, gb], dim=2)
 
         g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
-
         m2, eps = self.get_m2_and_eps(m2, self.eps)
 
         g_nat_kfe = g_kfe / (m2 + eps)
@@ -257,7 +256,7 @@ class EKFAC(Optimizer):
 
         return res
 
-    def update_cache(self, op, nbatches=1, grads=None):
+    def update_cache(self, op, **kwargs):
         for group in self.param_groups:
             if len(group['params']) == 2:
                 weight, bias = group['params']
@@ -265,32 +264,45 @@ class EKFAC(Optimizer):
                 weight = group['params'][0]
                 bias = None
             state = self.state[weight]
+
             if op == 'average_state':
+                assert 'nbatches' in kwargs, "Must provied nbatches"
+                nbatches = kwargs['nbatches']
                 if group['layer_type'] == 'BatchNorm2d':
                     state['exact_fw'] /= nbatches
                     state['exact_fb'] /= nbatches
                 else:
                     state['xxt'] /= nbatches
                     state['ggt'] /= nbatches
+
             elif op == 'average_moments':
+                assert 'nbatches' in kwargs, "Must provied nbatches"
+                nbatches = kwargs['nbatches']
                 if group['layer_type'] != 'BatchNorm2d':
                     state['m2'] /= nbatches
+
             elif op == 'state':
+                ex_weight = kwargs.get('ex_weight', None)
                 if group['layer_type'] == 'BatchNorm2d':
-                    self._update_diagonal(group, state)
+                    self._update_diagonal(group, state, ex_weight=ex_weight)
                 else:
-                    self._update_block(group, state)
+                    self._update_block(group, state, ex_weight=ex_weight)
+
             elif op == 'moments':
+                ex_weight = kwargs.get('ex_weight', None)
+                grads = kwargs.get('grads', None)
                 if group['layer_type'] != 'BatchNorm2d':
                     g = gb = None
                     if grads is not None:
                         g = grads[weight]
                         if bias is not None:
                             gb = grads[bias]
-                    self._update_block_moments(group, state, g=g, gb=gb)
+                    self._update_block_moments(group, state, g=g, gb=gb, ex_weight=ex_weight)
+
             elif op == 'basis':
                 if group['layer_type'] != "BatchNorm2d":
                     self._compute_block_basis(group, state)
+
             elif op == 'print':
                 print(group['mod'])
                 if group['layer_type'] == 'BatchNorm2d':
@@ -299,53 +311,60 @@ class EKFAC(Optimizer):
                     eigens = state['m2']
                 print(f"Max Eigenvalue: {eigens.max()}, Min Eigenvalue: {eigens.min()}, Mean Eigenvalue: {eigens.mean()}")
 
+            else:
+                raise Exception(f"Operation {op} not supported")
+
     def print_eigens(self):
         self.update_cache('print')
 
     # 1. accumulate average activation/gradients across batches
-    def update_state(self):
-        self.update_cache('state')
+    def update_state(self, ex_weight=None):
+        self.update_cache('state', ex_weight=ex_weight)
 
     # 2. average state across batches
     def average_state(self, nbatches):
-        self.update_cache('average_state', nbatches)
+        self.update_cache('average_state', nbatches=nbatches)
 
     # 3. compute eigenbasis from state
     def compute_basis(self):
         self.update_cache('basis')
 
     # 4. reaccumulate second moments
-    def update_moments(self, grads=None):
-        self.update_cache('moments', grads=grads)
+    def update_moments(self, grads=None, ex_weight=None):
+        self.update_cache('moments', grads=grads, ex_weight=ex_weight)
 
     # 5. average second moments
     def average_moments(self, nbatches):
-        self.update_cache('average_moments', nbatches)
+        self.update_cache('average_moments', nbatches=nbatches)
 
-    def _update_diagonal(self, group, state):
+    def _update_diagonal(self, group, state, ex_weight=None):
         mod = group['mod']
         x = self.state[group['mod']]['x']
         gy = self.state[group['mod']]['gy']
+        if ex_weight is None:
+            ex_weight = torch.ones(len(x)).cuda()
 
         gw = torch.sum(x * gy, (-1, -2))
-        gw = (gw**2).mean(0)
+        gw = ((gw**2) * ex_weight[:, None]).mean(0)
         if 'exact_fw' not in state:
             state['exact_fw'] = gw
         else:
             state['exact_fw'] += gw
         if mod.bias is not None:
             gb = torch.sum(gy, (-1, -2))
-            gb = (gb**2).mean(0)
+            gb = (gb**2 * ex_weight[:, None]).mean(0)
             if 'exact_fb' not in state:
-                state['exact_fb'] = gw
+                state['exact_fb'] = gb
             else:
-                state['exact_fb'] += gw
+                state['exact_fb'] += gb
 
-    def _update_block(self, group, state):
+    def _update_block(self, group, state, ex_weight=None):
         """stores covariances"""
         mod = group['mod']
         x = self.state[group['mod']]['x']
         gy = self.state[group['mod']]['gy']
+        if ex_weight is None:
+            ex_weight = torch.ones(len(x)).cuda()
 
         # Computation of xxt
         if group['layer_type'] == 'Conv2d':
@@ -354,13 +373,15 @@ class EKFAC(Optimizer):
                              stride=mod.stride, padding=mod.padding,
                              groups=mod.in_channels)
             #x = x.data.permute(1, 0, 2, 3).contiguous().view(x.shape[1], -1)
+            xweight = ex_weight[:, None, None].expand(-1, x.shape[-2], x.shape[-1]).flatten()
             x = x.data.permute(1, 0, 2, 3).reshape(x.shape[1], -1)
         else:
+            xweight = ex_weight
             x = x.data.t()
         if mod.bias is not None:
             ones = torch.ones_like(x[:1])
             x = torch.cat([x, ones], dim=0)
-        xxt = torch.mm(x, x.t()) / float(x.shape[1])
+        xxt = torch.mm(x, x.t() * xweight[:, None]) / float(x.shape[1])
         if 'xxt' not in state:
             state['xxt'] = xxt
         else:
@@ -371,18 +392,19 @@ class EKFAC(Optimizer):
             gy = gy.data.permute(1, 0, 2, 3)
             state['num_locations'] = gy.shape[2] * gy.shape[3]
             #gy = gy.contiguous().view(gy.shape[0], -1)
+            gweight = ex_weight[:, None, None].expand(-1, gy.shape[-2], gy.shape[-1]).flatten()
             gy = gy.reshape(gy.shape[0], -1)
         else:
+            gweight = ex_weight
             gy = gy.data.t()
             state['num_locations'] = 1
-
-        ggt = torch.mm(gy, gy.t()) / float(gy.shape[1])
+        ggt = torch.mm(gy, gy.t() * gweight[:, None]) / float(gy.shape[1])
         if 'ggt' not in state:
             state['ggt'] = ggt
         else:
             state['ggt'] += ggt
 
-    def _update_block_moments(self, group, state, g=None, gb=None):
+    def _update_block_moments(self, group, state, g=None, gb=None, ex_weight=None):
         """refit second moments"""
         # g and gb will have an extra batch dimension!!
         isconv = group['layer_type'] == 'Conv2d'
@@ -407,10 +429,14 @@ class EKFAC(Optimizer):
         else:
             g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
 
+        if ex_weight is None:
+            ex_weight = torch.ones(g_kfe.shape[0]).cuda()
+        ex_weight = ex_weight.view(-1, *(1,) * (g_kfe.ndim - 1))
+
         if 'm2' not in state:
-            state['m2'] = (g_kfe.detach()**2).sum(0)
+            state['m2'] = (g_kfe.detach()**2 * ex_weight).sum(0)
         else:
-            state['m2'] += (g_kfe.detach()**2).sum(0)
+            state['m2'] += (g_kfe.detach()**2 * ex_weight).sum(0)
 
     def _compute_block_basis(self, group, state, skip_m2=True):
         """computes eigendecomposition."""

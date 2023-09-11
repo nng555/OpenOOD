@@ -2,13 +2,18 @@ defaults:
   - _self_
   - override hydra/launcher: slurm
 
+seed: ~
+topk: ~
 tags: ~
 damping: ~
 left_output: ~
 right_output: ~
 command: ~
-temp: ~
+loss_temp: ~
 sample_temp: ~
+fsample_temp: ~
+temp: ~
+floss_temp: ~
 relative: ~
 topp: ~
 sample: ~
