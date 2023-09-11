@@ -41,6 +41,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.total_eps = self.args.total_eps
         self.state_path = self.args.state_path
         self.jac_chunk_size = self.args.jac_chunk_size
+        self.empirical = self.args.empirical
         self.moments_chunk_size = self.args.moments_chunk_size
         self.topk = self.args.topk
         if self.jac_chunk_size == -1:
@@ -96,7 +97,10 @@ class NAKPostprocessor(BasePostprocessor):
                         probs = F.softmax(logits / self.fsample_temp, -1)
                         if self.topk == -1:
                             # sample a single class
-                            labels = torch.multinomial(probs.detach(), 1).squeeze()
+                            if self.empirical:
+                                labels = batch['label'].cuda()
+                            else:
+                                labels = torch.multinomial(probs.detach(), 1).squeeze()
                             loss = F.cross_entropy(logits / self.floss_temp, labels)
                             loss.backward()
                             self.optimizer.update_state()
@@ -152,7 +156,10 @@ class NAKPostprocessor(BasePostprocessor):
                     probs = F.softmax(logits / self.fsample_temp, -1)
                     if self.topk == -1:
                         # sample a label
-                        targets = torch.multinomial(probs.detach(), 1).squeeze()
+                        if self.empirical:
+                            targets = batch['label'].cuda()
+                        else:
+                            targets = torch.multinomial(probs.detach(), 1).squeeze()
                         grads = vmap_moments(data, targets)
                         grads = {v: grads[k] for k, v in net.named_parameters()}
                         self.optimizer.update_moments(grads)
@@ -215,9 +222,11 @@ class NAKPostprocessor(BasePostprocessor):
 
         vmap_jac = vmap(process_single_jac, in_dims=(0,), chunk_size=self.jac_chunk_size)
         vmap_grad = vmap(process_single_grad, in_dims=(0,), chunk_size=self.jac_chunk_size)
-        #nak = vmap_jac(data)
-        nak = vmap_grad(data)
-        conf = torch.sum(-nak * F.softmax(logits / self.sample_temp, -1), -1)
+        nak = vmap_jac(data)
+        #nak = vmap_grad(data)
+        #conf = torch.sum(-nak * F.softmax(logits / self.sample_temp, -1), -1)
+        sample_probs = F.softmax(logits / self.sample_temp, -1)
+        nak = torch.bmm(torch.bmm(-nak, sample_probs), sample_probs)
 
         return pred, conf
 
