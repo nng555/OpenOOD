@@ -42,6 +42,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.state_path = self.args.state_path
         self.jac_chunk_size = self.args.jac_chunk_size
         self.empirical = self.args.empirical
+        self.ind_sample = self.args.ind_sample
         self.moments_chunk_size = self.args.moments_chunk_size
         self.topk = self.args.topk
         if self.jac_chunk_size == -1:
@@ -199,6 +200,7 @@ class NAKPostprocessor(BasePostprocessor):
         params = {k: v.detach() for k, v in net.named_parameters()}
         buffers = {k: v.detach() for k, v in net.named_buffers()}
 
+        # helper function for vmapping
         def grad_single(idv_ex, target):
             label = F.one_hot(target, self.num_classes)
             grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.loss_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
@@ -207,12 +209,9 @@ class NAKPostprocessor(BasePostprocessor):
             self_nak = self.optimizer.dict_dot(grads, nat_grads)
             return self_nak
 
-        vmap_grad_single = vmap(grad_single, in_dims=(None, 0))
-
         def process_single_grad(idv_ex):
-            return vmap_grad_single(idv_ex, torch.arange(self.num_classes).cuda())
+            return vmap(grad_single, in_dims=(None, 0))(idv_ex, torch.arange(self.num_classes).cuda())
 
-        # helper function for vmapping
         def process_single_jac(idv_ex):
             fjac = jacrev(lambda p, b, d: -F.log_softmax(functional_call(net, (p, b), (d,)) / self.loss_temp, -1))(params, buffers, idv_ex.unsqueeze(0))
             grads = {v: fjac[k][0] for k, v in net.named_parameters()}
@@ -220,13 +219,25 @@ class NAKPostprocessor(BasePostprocessor):
             self_nak = self.optimizer.dict_bdot(grads, nat_grads)
             return self_nak.diagonal()
 
+        def process_single_backward(idv_ex):
+            logits = net.forward(idv_ex.unsqueeze(0))
+            probs = F.softmax(logits / self.sample_temp, -1).detach()
+            grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.loss_temp, -1) * probs).sum())(params, buffers, idv_ex.unsqueeze(0))
+            grads = {v: grads[k].unsqueeze(0) for k, v in net.named_parameters()}
+            nat_grads = self.optimizer.step(grads=grads)
+            self_nak = self.optimizer.dict_dot(grads, nat_grads)
+            return self_nak
+
         vmap_jac = vmap(process_single_jac, in_dims=(0,), chunk_size=self.jac_chunk_size)
         vmap_grad = vmap(process_single_grad, in_dims=(0,), chunk_size=self.jac_chunk_size)
-        nak = vmap_jac(data)
-        #nak = vmap_grad(data)
-        #conf = torch.sum(-nak * F.softmax(logits / self.sample_temp, -1), -1)
-        sample_probs = F.softmax(logits / self.sample_temp, -1)
-        nak = torch.bmm(torch.bmm(-nak, sample_probs), sample_probs)
+        vmap_backward = vmap(process_single_backward, in_dims = (0,), chunk_size=self.jac_chunk_size)
+
+        if self.ind_sample:
+            conf = vmap_backward(data)
+        else:
+            nak = vmap_grad(data)
+            #nak = vmap_jac(data)
+            conf = torch.sum(-nak * F.softmax(logits / self.sample_temp, -1), -1)
 
         return pred, conf
 
