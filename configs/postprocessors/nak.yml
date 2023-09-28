@@ -25,6 +25,7 @@ postprocessor:
     ind_sample: False
     layer_eps: False
     sample: -1
+    wrt_logits: False
     topp: 1.0
     relative: False
     eps_type: mean
