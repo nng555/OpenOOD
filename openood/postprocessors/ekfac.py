@@ -5,7 +5,7 @@ from torch.optim.optimizer import Optimizer
 
 class EKFAC(Optimizer):
 
-    def __init__(self, net, eps, sua=False, layer_eps=True, eps_type='mean'):
+    def __init__(self, net, eps, sua=False, layer_eps=True, eps_type='mean', eigenscale=1.0, featskip=1, layerscale=1):
         """ EKFAC Preconditionner for Linear and Conv2d layers.
 
         Computes the EKFAC of the second moment of the gradients.
@@ -29,6 +29,10 @@ class EKFAC(Optimizer):
         self.numel = 0
         self.layer_eps = layer_eps
         self.eps_type = eps_type
+        self.eigenscale = eigenscale
+        self.featskip = featskip
+        self.layerscale = layerscale
+
         self._iteration_counter = 1
         for mod in net.modules():
             mod_class = mod.__class__.__name__
@@ -47,6 +51,23 @@ class EKFAC(Optimizer):
 
         super(EKFAC, self).__init__(self.params, {})
 
+    def get_spectrum(self):
+        res = []
+        for group in self.param_groups:
+            if len(group['params']) == 2:
+                weight, bias = group['params']
+            else:
+                weight = group['params'][0]
+                bias = None
+            state = self.state[weight]
+            if 'm2' in state:
+                m2 = state['m2'].flatten()
+            else:
+                m2 = torch.cat((state['exact_fw'].flatten(), state['exact_fb'].flatten()))
+            res.append(m2)
+
+        return res
+
     def init_hooks(self, net):
         self.clear_hooks()
         for mod in net.modules():
@@ -57,9 +78,15 @@ class EKFAC(Optimizer):
                 handle = mod.register_full_backward_hook(self._save_grad_output)
                 self._bwd_handles.append(handle)
 
-    def step(self, update_stats=True, update_params=True, grads=None):
+    def step(self, update_stats=True, update_params=True, grads=None, inverse=True, l2=False, return_feats=False):
         """Performs one step of preconditioning."""
         nat_grads = {}
+
+        eigenfeat = []
+        res = 0
+
+        scale = 1.
+
         for group in self.param_groups:
             # Getting parameters
             if len(group['params']) == 2:
@@ -75,23 +102,53 @@ class EKFAC(Optimizer):
                     bgrad = grads[bias]
 
             if group['layer_type'] == 'Conv2d' and self.sua:
-                nat_bgrad, nat_wgrad = self._precond_sua_ra(weight, bias, group, state, wgrad, bgrad)
+                precond_fn = self._precond_sua_ra
             elif group['layer_type'] == 'BatchNorm2d':
-                nat_bgrad, nat_wgrad = self._precond_diag_ra(weight, bias, group, state, wgrad, bgrad)
+                precond_fn = self._precond_diag_ra
             else:
-                nat_bgrad, nat_wgrad = self._precond_ra(weight, bias, group, state, wgrad, bgrad)
+                precond_fn = self._precond_ra
 
-            if nat_wgrad is not None:
-                nat_grads[weight] = nat_wgrad
-                if nat_bgrad is not None:
-                    nat_grads[bias] = nat_bgrad
+            # only one of grads or g_kfe should be set
+            out = precond_fn(weight, bias, group, state, scale,
+                    g=wgrad, gb=bgrad, inverse=inverse, l2=l2)
 
-        return nat_grads
+            if group['layer_type'] != 'BatchNorm2d':
+                scale *= self.layerscale
 
-    def dict_dot(self, ldict, rdict):
-        res = 0
-        for p in rdict:
-            res += torch.dot(rdict[p].flatten(), ldict[p].flatten()) / self.numel
+            if l2:
+                norm, g_kfe = out
+                res += norm
+                if return_feats:
+                    eigenfeat.append(g_kfe.flatten())
+            else:
+                nat_bgrad, nat_wgrad = out
+                if nat_wgrad is not None:
+                    nat_grads[weight] = nat_wgrad
+                    if nat_bgrad is not None:
+                        nat_grads[bias] = nat_bgrad
+        if l2:
+            if return_feats:
+                return res, torch.cat(eigenfeat)
+            else:
+                return res
+        else:
+            return nat_grads
+
+    def dict_dot(self, ldict, rdict, params=None):
+        res = None
+        if params is None:
+            for p in rdict:
+                if res is None:
+                    res = torch.dot(rdict[p].flatten(), ldict[p].flatten()) / self.numel
+                else:
+                    res += torch.dot(rdict[p].flatten(), ldict[p].flatten()) / self.numel
+        else:
+            for k, v in params:
+                if v in rdict:
+                    if res is None:
+                        res = torch.dot(ldict[k].flatten(), rdict[v].flatten()) / self.numel
+                    else:
+                        res += torch.dot(ldict[k].flatten(), rdict[v].flatten()) / self.numel
         return res
 
     def dict_bdot(self, ldict, rdict):
@@ -137,7 +194,8 @@ class EKFAC(Optimizer):
             eps = self.get_eps(m2)
         return m2, eps
 
-    def _precond_ra(self, weight, bias, group, state, g=None, gb=None):
+    def _precond_ra(self, weight, bias, group, state, scale,
+            g=None, gb=None, inverse=True, l2=False):
         """Applies preconditioning."""
         res = []
         kfe_x = state['kfe_x']
@@ -158,8 +216,18 @@ class EKFAC(Optimizer):
 
         #m2 = m2.add(g_kfe**2)
         m2, eps = self.get_m2_and_eps(m2, self.eps)
+        m2 *= scale
         # layerwise multiplicative damping
-        g_nat_kfe = g_kfe / (m2 + eps)
+        if inverse:
+            #import ipdb; ipdb.set_trace()
+            if l2:
+                return (g_kfe**2 * self.eigenscale / (m2 + eps)).sum() / self.numel, g_kfe**2
+            g_nat_kfe = g_kfe * self.eigenscale / (m2 + eps)
+        else:
+            if l2:
+                return (g_kfe**2 * ((m2 + eps) * self.eigenscale)).sum() / self.numel, g_kfe**2
+            g_nat_kfe = g_kfe * ((m2 + eps) * self.eigenscale)
+
         g_nat = torch.matmul(torch.matmul(kfe_gy, g_nat_kfe), kfe_x.t())
 
         if bias is not None:
@@ -182,7 +250,8 @@ class EKFAC(Optimizer):
 
         return res
 
-    def _precond_sua_ra(self, weight, bias, group, state, g=None, gb=None):
+    def _precond_sua_ra(self, weight, bias, group, state, scale,
+            g=None, gb=None, inverse=True, l2=False):
         """Preconditioning for KFAC SUA."""
         res = []
         kfe_x = state['kfe_x']
@@ -201,8 +270,17 @@ class EKFAC(Optimizer):
 
         g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
         m2, eps = self.get_m2_and_eps(m2, self.eps)
+        m2 *= scale
 
-        g_nat_kfe = g_kfe / (m2 + eps)
+        if inverse:
+            if l2:
+                return (g_kfe**2 * self.eigenscale / (m2 + eps)).sum() / self.numel, g_kfe**2
+            g_nat_kfe = g_kfe * self.eigenscale / (m2 + eps)
+        else:
+            if l2:
+                return (g_kfe**2 * ((m2 + eps) * self.eigenscale)).sum() / self.numel, g_kfe**2
+            g_nat_kfe = g_kfe * ((m2 + eps) * self.eigenscale)
+
         g_nat = self._to_kfe_sua(g_nat_kfe, kfe_x.t(), kfe_gy.t())
         if bias is not None:
             gb = g_nat[:, :, -1, s[3]//2, s[4]//2]
@@ -223,36 +301,59 @@ class EKFAC(Optimizer):
 
         return res
 
-    def _precond_diag_ra(self, weight, bias, group, state, g=None, gb=None):
+    def _precond_diag_ra(self, weight, bias, group, state, scale,
+            g=None, gb=None, inverse=True, l2=False):
         res = []
         if g is None:
+
             g = weight.grad.data.unsqueeze(0)
         fw = state['exact_fw']
         fw, eps = self.get_m2_and_eps(fw, self.eps)
+        fw *= scale
 
-        g_nat = g / (fw + eps)
+        if inverse:
+            if l2:
+                g_nat_raw = g**2
+            g_nat = g * self.eigenscale / (fw + eps)
+        else:
+            if l2:
+                g_nat_raw = g**2
+            g_nat = g * ((fw + eps) * self.eigenscale)
 
         if bias is not None:
             if gb is None:
                 gb = bias.grad.data.unsqueeze(0)
             fb = state['exact_fb']
             fb, eps = self.get_m2_and_eps(fb, self.eps)
+            fb *= scale
 
-            gb_nat = gb / (fb + eps)
+            if inverse:
+                if l2:
+                    gb_nat_raw = gb**2
+                gb_nat = gb * self.eigenscale / (fb + eps)
+            else:
+                if l2:
+                    gb_nat_raw = gb**2
+                gb_nat = gb * ((fb + eps) * self.eigenscale)
 
-            if bias.grad is not None:
-                bias.grad.data = gb_nat.squeeze()
+            if not l2:
+                if bias.grad is not None:
+                    bias.grad.data = gb_nat.squeeze()
+                    res.append(None)
+                else:
+                    res.append(gb_nat)
+        else:
+            res.append(None)
+
+        if not l2:
+            if weight.grad is not None:
+                weight.grad.data = g_nat.squeeze()
                 res.append(None)
             else:
-                res.append(gb_nat)
-        else:
-            res.append(None)
+                res.append(g_nat)
 
-        if weight.grad is not None:
-            weight.grad.data = g_nat.squeeze()
-            res.append(None)
-        else:
-            res.append(g_nat)
+        if l2:
+            return (g_nat.sum() + gb_nat.sum()) / self.numel, torch.cat((g_nat_raw, gb_nat_raw), -1)
 
         return res
 
@@ -309,7 +410,7 @@ class EKFAC(Optimizer):
                     eigens = state['exact_fw']
                 else:
                     eigens = state['m2']
-                print(f"Max Eigenvalue: {eigens.max()}, Min Eigenvalue: {eigens.min()}, Mean Eigenvalue: {eigens.mean()}")
+                print(f"Max Eigenvalue: {eigens.max()}, Min Eigenvalue: {eigens.min()}, Min Nonzero Eigenvalue: {eigens[eigens != 0.0].min()}, Mean Eigenvalue: {eigens.mean()}")
 
             else:
                 raise Exception(f"Operation {op} not supported")

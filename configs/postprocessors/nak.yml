@@ -19,13 +19,19 @@ postprocessor:
     top_layer: False
     loss_temp: 1.0
     sample_temp: 1.0
+    inverse: True
     fsample_temp: 1.0
+    featskip: 1
+    eigenscale: 1.0
     floss_temp: 1.0
+    layerscale: 1.0
+    loss_fn: ce
     empirical : False
     ind_sample: False
+    off_diag: False
     layer_eps: False
+    ntrain: -1
     sample: -1
-    wrt_logits: False
     topp: 1.0
     relative: False
     eps_type: mean

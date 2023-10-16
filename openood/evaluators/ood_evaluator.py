@@ -50,10 +50,10 @@ class OODEvaluator(BaseEvaluator):
             id_pred = id_conf = id_gt = None
         else:
             print(f'Performing inference on {dataset_name} dataset...', flush=True)
-            id_pred, id_conf, id_gt = postprocessor.inference(
+            id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
                 net, id_data_loaders['test'])
             if self.config.recorder.save_scores:
-                self._save_scores(id_pred, id_conf, id_gt, dataset_name)
+                self._save_scores(id_pred, id_conf, id_gt, id_extra, dataset_name)
 
         if fsood:
             # load csid data and compute confidence
@@ -95,10 +95,10 @@ class OODEvaluator(BaseEvaluator):
         for dataset_name, ood_dl in ood_data_loaders[ood_split].items():
             print(f'Performing inference on {dataset_name} dataset...',
                   flush=True)
-            ood_pred, ood_conf, ood_gt = postprocessor.inference(net, ood_dl)
+            ood_pred, ood_conf, ood_gt, ood_extra = postprocessor.inference(net, ood_dl)
             ood_gt = -1 * np.ones_like(ood_gt)  # hard set to -1 as ood
             if self.config.recorder.save_scores:
-                self._save_scores(ood_pred, ood_conf, ood_gt, dataset_name)
+                self._save_scores(ood_pred, ood_conf, ood_gt, ood_extra, dataset_name)
 
             pred = np.concatenate([id_pred, ood_pred])
             conf = np.concatenate([id_conf, ood_conf])
@@ -180,13 +180,14 @@ class OODEvaluator(BaseEvaluator):
                 writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
                 writer.writerow(write_content)
 
-    def _save_scores(self, pred, conf, gt, save_name):
+    def _save_scores(self, pred, conf, gt, extra, save_name):
         save_dir = os.path.join(self.config.output_dir, 'scores')
         os.makedirs(save_dir, exist_ok=True)
         np.savez(os.path.join(save_dir, save_name),
                  pred=pred,
                  conf=conf,
-                 label=gt)
+                 label=gt,
+                 extra=extra,)
 
     def eval_acc(self,
                  net: nn.Module,
@@ -203,7 +204,7 @@ class OODEvaluator(BaseEvaluator):
             net['backbone'].eval()
         else:
             net.eval()
-        self.id_pred, self.id_conf, self.id_gt = postprocessor.inference(
+        self.id_pred, self.id_conf, self.id_gt, self.extra = postprocessor.inference(
             net, data_loader)
 
         if fsood:
