@@ -5,15 +5,34 @@ class ResNet50(ResNet):
     def __init__(self,
                  block=Bottleneck,
                  layers=[3, 4, 6, 3],
-                 num_classes=1000):
+                 num_classes=1000,
+                 cifar=False):
         super(ResNet50, self).__init__(block=block,
                                        layers=layers,
                                        num_classes=num_classes)
         self.feature_size = 2048
+        self.cifar = cifar
+        if self.cifar:
+            import torch.nn as nn
+            self.conv1 = nn.Conv2d(3,
+                                   64,
+                                   kernel_size=3,
+                                   stride=1,
+                                   padding=1,
+                                   bias=False)
+            self.bn1 = nn.BatchNorm2d(64)
+
+        # make relus not inplace so we can hook through
+        self.relu = nn.ReLU(inplace=False)
+        for layer in [self.layer1, self.layer2, self.layer3, self.layer4]:
+            for block in layer:
+                if hasattr(block, 'relu'):
+                    block.relu = nn.ReLU(inplace=False)
 
     def forward(self, x, return_feature=False, return_feature_list=False):
         feature1 = self.relu(self.bn1(self.conv1(x)))
-        feature1 = self.maxpool(feature1)
+        if not self.cifar:
+            feature1 = self.maxpool(feature1)
         feature2 = self.layer1(feature1)
         feature3 = self.layer2(feature2)
         feature4 = self.layer3(feature3)
@@ -32,7 +51,8 @@ class ResNet50(ResNet):
 
     def forward_threshold(self, x, threshold):
         feature1 = self.relu(self.bn1(self.conv1(x)))
-        feature1 = self.maxpool(feature1)
+        if not self.cifar:
+            feature1 = self.maxpool(feature1)
         feature2 = self.layer1(feature1)
         feature3 = self.layer2(feature2)
         feature4 = self.layer3(feature3)
@@ -46,7 +66,8 @@ class ResNet50(ResNet):
 
     def intermediate_forward(self, x, layer_index):
         out = self.relu(self.bn1(self.conv1(x)))
-        out = self.maxpool(out)
+        if not self.cifar:
+            out = self.maxpool(out)
 
         out = self.layer1(out)
         if layer_index == 1:

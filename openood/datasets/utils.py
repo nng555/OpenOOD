@@ -75,16 +75,17 @@ def get_dataloader(config: Config):
                 preprocessor=preprocessor,
                 data_aux_preprocessor=data_aux_preprocessor)
             sampler = None
-            if dataset_config.num_gpus * dataset_config.num_machines > 1:
-                sampler = torch.utils.data.distributed.DistributedSampler(
-                    dataset)
-                split_config.shuffle = False
+            #if dataset_config.num_gpus * dataset_config.num_machines > 1:
+            #    sampler = torch.utils.data.distributed.DistributedSampler(
+            #        dataset)
+            #    split_config.shuffle = False
 
             dataloader = DataLoader(dataset,
                                     batch_size=split_config.batch_size,
                                     shuffle=split_config.shuffle,
                                     num_workers=dataset_config.num_workers,
                                     sampler=sampler)
+            """
             if split_config.get('class_loader', False):
                 class_loaders = []
                 for k in range(dataset_config.num_classes):
@@ -97,6 +98,7 @@ def get_dataloader(config: Config):
                         num_workers=dataset_config.num_workers,
                     ))
                 dataloader_dict[split + '_class'] = class_loaders
+            """
 
 
         dataloader_dict[split] = dataloader

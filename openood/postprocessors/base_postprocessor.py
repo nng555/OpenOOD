@@ -33,8 +33,16 @@ class BasePostprocessor:
         for i, batch in enumerate(tqdm(data_loader,
                           disable=not progress or not comm.is_main_process())):
             data = batch['data'].cuda()
+            if next(net.parameters()).dtype == torch.float64:
+                data = data.double()
             label = batch['label'].cuda()
-            pred, conf, extra = self.postprocess(net, data)
+
+            res = self.postprocess(net, data)
+            if len(res) == 2:
+                pred, conf = res
+                extra = None
+            else:
+                pred, conf, extra = res
 
             pred_list.append(pred.cpu())
             conf_list.append(conf.cpu())
@@ -42,13 +50,7 @@ class BasePostprocessor:
 
             if extra is not None:
                 for k, v in extra.items():
-                    if k == 'eigenfeat':
-                        if len(extras[k]) == 0:
-                            extras[k] = v.cpu() / nbatches
-                        else:
-                            extras[k] += v.cpu() / nbatches
-                    else:
-                        extras[k].append(v.cpu())
+                    extras[k].append(v.cpu())
 
         # convert values into numpy array
         pred_list = torch.cat(pred_list).numpy().astype(int)
@@ -56,10 +58,7 @@ class BasePostprocessor:
         label_list = torch.cat(label_list).numpy().astype(int)
 
         for k in extras:
-            if k == 'eigenfeat':
-                extras[k] = extras[k].numpy()
-            else:
-                extras[k] = torch.cat(extras[k]).numpy()
+            extras[k] = torch.cat(extras[k]).numpy()
 
         if len(extras) == 0:
             extras = None

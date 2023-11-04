@@ -37,6 +37,16 @@ class BasePreprocessor():
                 tvs_trans.ToTensor(),
                 tvs_trans.Normalize(mean=self.mean, std=self.std),
             ])
+        # no data aug for MNIST
+        elif 'mnist' in config.dataset.name:
+            self.transform = tvs_trans.Compose([
+                Convert('RGB'),
+                tvs_trans.Resize(self.pre_size,
+                                 interpolation=self.interpolation),
+                tvs_trans.CenterCrop(self.image_size),
+                tvs_trans.ToTensor(),
+                tvs_trans.Normalize(mean=self.mean, std=self.std),
+            ])
         else:
             self.transform = tvs_trans.Compose([
                 Convert('RGB'),

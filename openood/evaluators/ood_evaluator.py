@@ -46,14 +46,11 @@ class OODEvaluator(BaseEvaluator):
             self.hyperparam_search(net, id_data_loaders['val'],
                                    ood_data_loaders['val'], postprocessor)
 
-        if self.config.postprocessor.skip_id:
-            id_pred = id_conf = id_gt = None
-        else:
-            print(f'Performing inference on {dataset_name} dataset...', flush=True)
-            id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
-                net, id_data_loaders['test'])
-            if self.config.recorder.save_scores:
-                self._save_scores(id_pred, id_conf, id_gt, id_extra, dataset_name)
+        print(f'Performing inference on {dataset_name} dataset...', flush=True)
+        id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
+            net, id_data_loaders['test'])
+        if self.config.recorder.save_scores:
+            self._save_scores(id_pred, id_conf, id_gt, id_extra, dataset_name)
 
         if fsood:
             # load csid data and compute confidence
@@ -246,9 +243,9 @@ class OODEvaluator(BaseEvaluator):
             hyperparam_list, count)
         for hyperparam in hyperparam_combination:
             postprocessor.set_hyperparam(hyperparam)
-            id_pred, id_conf, id_gt = postprocessor.inference(
+            id_pred, id_conf, id_gt, _ = postprocessor.inference(
                 net, id_data_loader)
-            ood_pred, ood_conf, ood_gt = postprocessor.inference(
+            ood_pred, ood_conf, ood_gt, _ = postprocessor.inference(
                 net, ood_data_loader)
             ood_gt = -1 * np.ones_like(ood_gt)  # hard set to -1 as ood
             pred = np.concatenate([id_pred, ood_pred])

@@ -42,7 +42,10 @@ def get_network(network_config):
     num_classes = network_config.num_classes
 
     if network_config.name == 'resnet18_32x32':
-        net = ResNet18_32x32(num_classes=num_classes)
+        use_bn = network_config.use_bn
+        bn_affine = network_config.bn_affine
+        random_affine = network_config.random_affine
+        net = ResNet18_32x32(num_classes=num_classes, use_bn=use_bn, bn_affine=bn_affine, random_affine=random_affine)
 
     elif network_config.name == 'resnet18_256x256':
         net = ResNet18_256x256(num_classes=num_classes)
@@ -54,7 +57,8 @@ def get_network(network_config):
         net = ResNet18_224x224(num_classes=num_classes)
 
     elif network_config.name == 'resnet50':
-        net = ResNet50(num_classes=num_classes)
+        cifar = network_config.cifar
+        net = ResNet50(num_classes=num_classes, cifar=cifar)
 
     elif network_config.name == 'lenet':
         net = LeNet(num_classes=num_classes, num_channel=3)

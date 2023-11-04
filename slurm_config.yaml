@@ -6,7 +6,7 @@ seed: ~
 topk: ~
 ntrain: ~
 layerscale: ~
-loss_fn: ~
+floss_fn: ~
 tags: ~
 damping: ~
 left_output: ~

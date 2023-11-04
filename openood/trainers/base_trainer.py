@@ -8,7 +8,7 @@ from tqdm import tqdm
 import openood.utils.comm as comm
 from openood.utils import Config
 
-from .lr_scheduler import cosine_annealing
+from .lr_scheduler import cosine_annealing, constant_divide
 
 
 class BaseTrainer:
@@ -27,6 +27,7 @@ class BaseTrainer:
             nesterov=True,
         )
 
+        """
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer,
             lr_lambda=lambda step: cosine_annealing(
@@ -35,6 +36,17 @@ class BaseTrainer:
                 1,
                 1e-6 / config.optimizer.lr,
             ),
+        )
+        """
+        div_steps = [dstep * len(train_loader) for dstep in [60,120,160]]
+
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=lambda step: constant_divide(
+                step,
+                div_steps,
+                [5,5,5],
+            )
         )
 
     def train_epoch(self, epoch_idx):
@@ -72,6 +84,7 @@ class BaseTrainer:
         metrics = {}
         metrics['epoch_idx'] = epoch_idx
         metrics['loss'] = self.save_metrics(loss_avg)
+        print(self.scheduler.get_last_lr())
 
         return self.net, metrics
 

@@ -29,6 +29,7 @@ class TrainPipeline:
 
         # init network
         net = get_network(self.config.network)
+        print(net)
 
         # init trainer and evaluator
         trainer = get_trainer(net, train_loader, val_loader, self.config)
