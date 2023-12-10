@@ -1,5 +1,6 @@
 from torchvision.models.resnet import BasicBlock, ResNet
-
+import torch.nn as nn
+import torch.nn.functional as F
 
 class ResNet18_224x224(ResNet):
     def __init__(self,
@@ -10,6 +11,7 @@ class ResNet18_224x224(ResNet):
                                                layers=layers,
                                                num_classes=num_classes)
         self.feature_size = 512
+        self.relu = nn.ReLU()
 
     def forward(self, x, return_feature=False, return_feature_list=False):
         feature1 = self.relu(self.bn1(self.conv1(x)))

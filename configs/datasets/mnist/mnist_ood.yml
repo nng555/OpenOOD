@@ -1,7 +1,7 @@
 ood_dataset:
   name: mnist_ood
   num_classes: 10
-
+  subset: -1.0
   num_workers: '@{num_workers}'
   num_gpus: '@{num_gpus}'
   num_machines: '@{num_machines}'

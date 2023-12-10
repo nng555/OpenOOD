@@ -9,12 +9,13 @@ postprocessor:
     moments_iter: -1
     state_path: None
     left_output: loss
-    jac_chunk_size: 8
+    jac_chunk_size: 1
     remove_top: False
     center: False
     moments_chunk_size: -1
     odin: False
     noise: 0.0014
+    odin_temp: 1000
     ndata_iters: 1
     right_output: loss
     sum_labels: False
@@ -24,16 +25,23 @@ postprocessor:
     double: False
     fuse: False
     mdl_weight: 0
-    nfeature_reduce: 2000
+    nfeature_reduce: 100
     top_layer: False
-    loss_temp: 1.0
-    sample_temp: 1.0
+    sud: True
     inverse: True
-    fsample_temp: 1.0
     featskip: 1
     eigenscale: 1.0
-    floss_temp: 1.0
     temp: -1.0
+    class_chunk_size: -1
+    eigen_temp: -1.0
+    remove_top_layers: 0
+    remove_bot_layers: 0
+    full_fim: False
+    random_label: False
+    sandwich: False
+    moments_temp: -1.0
+    grad_temp: -1.0
+    whiten: False
     layerscale: 1.0
     floss_fn: ce
     ce_weight: 1.0

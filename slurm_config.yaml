@@ -12,12 +12,12 @@ damping: ~
 left_output: ~
 right_output: ~
 command: ~
-loss_temp: ~
-sample_temp: ~
-fsample_temp: ~
 temp: ~
-floss_temp: ~
+eigen_temp: ~
+moments_temp: ~
+grad_temp: ~
 relative: ~
+use_bn: ~
 topp: ~
 sample: ~
 

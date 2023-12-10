@@ -53,8 +53,9 @@ class BasePreprocessor():
                 tvs_trans.Resize(self.pre_size,
                                  interpolation=self.interpolation),
                 tvs_trans.CenterCrop(self.image_size),
-                tvs_trans.RandomHorizontalFlip(),
-                tvs_trans.RandomCrop(self.image_size, padding=4),
+                #tvs_trans.RandomHorizontalFlip(),
+                #tvs_trans.RandomCrop(self.image_size, padding=4),
+                #tvs_trans.CenterCrop(self.image_size),
                 tvs_trans.ToTensor(),
                 tvs_trans.Normalize(mean=self.mean, std=self.std),
             ])

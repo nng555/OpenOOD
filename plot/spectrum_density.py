@@ -18,7 +18,15 @@ spec = torch.load(os.path.join(spec_dir, args.name + '_spec.cpt'), map_location=
 blue = Color('blue')
 colors = list(blue.range_to(Color('green'), len(spec)))
 
-for s, c in zip(spec, colors):
-    sns.kdeplot(np.log(s.numpy()), color=str(c), bw_adjust=0.5, fill=True, alpha=0.2)
+fig1, ax1 = plt.subplots()
 
-plt.savefig(os.path.join(spec_dir, args.out))
+for i, (s, c) in enumerate(zip(spec, colors)):
+    fig2, ax2 = plt.subplots()
+    dens = np.log10(s.numpy())
+    dens[np.isnan(dens)] = -80
+    sns.kdeplot(dens, color=str(c), bw_adjust=0.5, fill=True, alpha=0.8, ax=ax2)
+    sns.kdeplot(dens, color=str(c), bw_adjust=0.5, fill=True, alpha=0.1, ax=ax1)
+    ax2.axvline(x = np.log10(np.median(s)))
+    fig2.savefig(os.path.join(spec_dir, args.out + f'_{i}.png'))
+    plt.close(fig2)
+fig1.savefig(os.path.join(spec_dir, args.out + '.png'))

@@ -32,9 +32,11 @@ def fuse_conv(conv, bn):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False):
+    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False, residual=True):
         super(BasicBlock, self).__init__()
         self.use_bn = use_bn
+        self.residual = residual
+        self.relu = nn.ReLU()
         self.conv1 = nn.Conv2d(in_planes,
                                planes,
                                kernel_size=3,
@@ -57,7 +59,7 @@ class BasicBlock(nn.Module):
                 randomize_bn(self.bn2)
 
         self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
+        if (stride != 1 or in_planes != self.expansion * planes) and self.residual:
             if self.use_bn:
                 sbn = nn.BatchNorm2d(self.expansion * planes, affine=bn_affine)
                 if random_affine:
@@ -89,23 +91,28 @@ class BasicBlock(nn.Module):
 
     def forward(self, x):
         if self.use_bn:
-            out = F.relu(self.bn1(self.conv1(x)))
+            out = self.relu(self.bn1(self.conv1(x)))
             out = self.bn2(self.conv2(out))
         else:
-            out = F.relu(self.conv1(x))
+            out = self.relu(self.conv1(x))
             out = self.conv2(out)
 
-        sout = out + self.shortcut(x)
-        sout = F.relu(sout)
+        if self.residual:
+            sout = out + self.shortcut(x)
+        else:
+            sout = out
+        sout = self.relu(sout)
         return sout
 
 
 class Bottleneck(nn.Module):
     expansion = 4
 
-    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False):
+    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False, residual=True):
         super(Bottleneck, self).__init__()
         self.use_bn = use_bn
+        self.residual = residual
+        self.relu = nn.ReLU()
 
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, bias=False)
         if self.use_bn:
@@ -132,7 +139,7 @@ class Bottleneck(nn.Module):
                 randomize_bn(self.bn3)
 
         self.shortcut = nn.Sequential()
-        if stride != 1 or in_planes != self.expansion * planes:
+        if (stride != 1 or in_planes != self.expansion * planes) and self.residual:
             if self.use_bn:
                 sbn = nn.BatchNorm2d(self.expansion * Planes, affine=bn_affine)
                 if random_affine:
@@ -167,24 +174,30 @@ class Bottleneck(nn.Module):
 
     def forward(self, x):
         if self.use_bn:
-            out = F.relu(self.bn1(self.conv1(x)))
-            out = F.relu(self.bn2(self.conv2(out)))
+            out = self.relu(self.bn1(self.conv1(x)))
+            out = self.relu(self.bn2(self.conv2(out)))
             out = self.bn3(self.conv3(out))
         else:
-            out = F.relu(self.conv1(x))
-            out = F.relu(self.conv2(out))
+            out = self.relu(self.conv1(x))
+            out = self.relu(self.conv2(out))
             out = self.conv3(out)
-        sout = out + self.shortcut(x)
-        sout = F.relu(sout)
+        if self.residual:
+            sout = out + self.shortcut(x)
+        else:
+            sout = out
+        sout = self.relu(sout)
         return sout
 
 
 class ResNet18_32x32(nn.Module):
-    def __init__(self, block=BasicBlock, num_blocks=None, num_classes=10, use_bn=True, bn_affine=True, random_affine=False):
+    def __init__(self, block=BasicBlock, num_blocks=None, num_classes=10, use_bn=True, bn_affine=True, random_affine=False, residual=True):
         super(ResNet18_32x32, self).__init__()
         self.use_bn = use_bn
+        self.residual = residual
         self.bn_affine = bn_affine
         self.random_affine = random_affine
+
+        self.relu = nn.ReLU()
 
         if num_blocks is None:
             num_blocks = [2, 2, 2, 2]
@@ -201,23 +214,23 @@ class ResNet18_32x32(nn.Module):
             if self.random_affine:
                 randomize_bn(self.bn1)
         self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
         # self.avgpool = nn.AvgPool2d(4)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
         self.feature_size = 512 * block.expansion
 
-    def _make_layer(self, block, planes, num_blocks, stride, use_bn, bn_affine, random_affine):
+    def _make_layer(self, block, planes, num_blocks, stride, use_bn, bn_affine, random_affine, residual):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_planes, planes, stride, use_bn, bn_affine, random_affine))
+            layers.append(block(self.in_planes, planes, stride, use_bn, bn_affine, random_affine, residual))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
@@ -231,15 +244,36 @@ class ResNet18_32x32(nn.Module):
                 block.fuse_conv_bn_layers()
         del self.bn1
 
-    def forward(self, x, return_feature=False, return_feature_list=False):
-        if self.use_bn:
-            feature1 = F.relu(self.bn1(self.conv1(x)))
+    def forward(self, x, return_feature=False, return_feature_list=False, lindex=-1):
+
+        if lindex < 0:
+            if self.use_bn:
+                feature1 = self.relu(self.bn1(self.conv1(x)))
+            else:
+                feature1 = self.relu(self.conv1(x))
         else:
-            feature1 = F.relu(self.conv1(x))
-        feature2 = self.layer1(feature1)
-        feature3 = self.layer2(feature2)
-        feature4 = self.layer3(feature3)
-        feature5 = self.layer4(feature4)
+            feature1 = x
+
+        if lindex < 1:
+            feature2 = self.layer1(feature1)
+        else:
+            feature2 = feature1
+
+        if lindex < 2:
+            feature3 = self.layer2(feature2)
+        else:
+            feature3 = feature2
+
+        if lindex < 3:
+            feature4 = self.layer3(feature3)
+        else:
+            feature4 = feature3
+
+        if lindex < 4:
+            feature5 = self.layer4(feature4)
+        else:
+            feature5 = feature4
+
         feature5 = self.avgpool(feature5)
         feature = feature5.view(feature5.size(0), -1)
         logits_cls = self.fc(feature)
@@ -252,7 +286,7 @@ class ResNet18_32x32(nn.Module):
             return logits_cls
 
     def forward_threshold(self, x, threshold):
-        feature1 = F.relu(self.bn1(self.conv1(x)))
+        feature1 = self.relu(self.bn1(self.conv1(x)))
         feature2 = self.layer1(feature1)
         feature3 = self.layer2(feature2)
         feature4 = self.layer3(feature3)
@@ -265,7 +299,10 @@ class ResNet18_32x32(nn.Module):
         return logits_cls
 
     def intermediate_forward(self, x, layer_index):
-        out = F.relu(self.bn1(self.conv1(x)))
+        if self.use_bn:
+            out = self.relu(self.bn1(self.conv1(x)))
+        else:
+            out = self.relu(self.conv1(x))
 
         out = self.layer1(out)
         if layer_index == 1:

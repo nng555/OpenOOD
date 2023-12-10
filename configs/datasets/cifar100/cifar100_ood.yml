@@ -9,6 +9,7 @@ ood_dataset:
   dataset_class: ImglistDataset
   batch_size: 128
   shuffle: False
+  subset: -1.0
 
   split_names: [val, nearood, farood]
   val:

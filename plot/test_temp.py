@@ -2,13 +2,17 @@ import argparse
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+from colour import Color
 from scipy.special import softmax
+import seaborn as sns
 from sklearn.metrics import roc_auc_score
+from pathlib import Path
 
 slurm_dir = '/h/nng/slurm'
 parser = argparse.ArgumentParser()
 parser.add_argument('-n', '--name', help='name of dir')
 parser.add_argument('-d', '--dataset', help='name of ID dataset')
+parser.add_argument('-t', '--temp', type=float, help='temp')
 args = parser.parse_args()
 
 if args.dataset == 'cifar10':
@@ -28,14 +32,18 @@ elif args.dataset == 'cifar100':
 
 ddir = os.path.join(slurm_dir, args.name, res_dir)
 id_data = np.load(os.path.join(ddir, args.dataset + '.npz'), allow_pickle=True)['extra'].item()
-id_norm = id_data['m2_norm'].sum(-1)
-for fname in os.listdir(ddir):
-    if fname.split('.npz')[0] == args.dataset:
-        continue
-    print(fname)
-    ood_data = np.load(os.path.join(ddir, fname), allow_pickle=True)['extra'].item()
-    ood_norm = ood_data['m2_norm'].sum(-1)
-    import ipdb; ipdb.set_trace()
-    labels = np.concatenate((np.zeros(len(id_norm)), np.ones(len(ood_norm))))
-    print(roc_auc_score(labels, np.concatenate((id_norm.mean(-1), ood_norm.mean(-1)))))
+id_norm = (id_data['m2_norm'] * softmax(id_data['logits'] / args.temp, -1)[:, :, None]).sum(1)
+Path(args.name.split('/')[-1]).mkdir(parents=True, exist_ok=True)
 
+for fname in os.listdir(ddir):
+    print(fname)
+    if fname == args.dataset + '.npz':
+        continue
+    ood_data = np.load(os.path.join(ddir, fname), allow_pickle=True)['extra'].item()
+    ood_norm = (ood_data['m2_norm'] * softmax(ood_data['logits'] / args.temp, -1)[:, :, None]).sum(1)
+    labels = np.concatenate((np.zeros(len(id_norm)), np.ones(len(ood_norm))))
+
+    for i in range(id_norm.shape[-1]):
+        print(roc_auc_score(labels, np.concatenate((id_norm[:, i], ood_norm[:, i]))))
+
+    print()

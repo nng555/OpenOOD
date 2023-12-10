@@ -12,26 +12,27 @@ ood_dataset:
   num_workers: '@{num_workers}'
   num_gpus: '@{num_gpus}'
   num_machines: '@{num_machines}'
+  subset: -1.0
   split_names: [val, nearood, farood]
   val:
-    data_dir: ./data/images_largescale/
-    imglist_pth: ./data/benchmark_imglist/imagenet200/val_openimage_o.txt
+    data_dir: /h/nng/projects/OpenOOD/data/images_largescale/
+    imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/imagenet200/val_openimage_o.txt
   nearood:
     datasets: [ssb_hard, ninco]
     ssb_hard:
-      data_dir: ./data/images_largescale/
-      imglist_pth: ./data/benchmark_imglist/imagenet/test_ssb_hard.txt
+      data_dir: /h/nng/projects/OpenOOD/data/images_largescale/
+      imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/imagenet/test_ssb_hard.txt
     ninco:
-      data_dir: ./data/images_largescale/
-      imglist_pth: ./data/benchmark_imglist/imagenet/test_ninco.txt
+      data_dir: /h/nng/projects/OpenOOD/data/images_largescale/
+      imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/imagenet/test_ninco.txt
   farood:
     datasets: [inaturalist, textures, openimageo]
     textures:
-      data_dir: ./data/images_classic/
-      imglist_pth: ./data/benchmark_imglist/imagenet/test_textures.txt
+      data_dir: /h/nng/projects/OpenOOD/data/images_classic/
+      imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/imagenet/test_textures.txt
     inaturalist:
-      data_dir: ./data/images_largescale/
-      imglist_pth: ./data/benchmark_imglist/imagenet/test_inaturalist.txt
+      data_dir: /h/nng/projects/OpenOOD/data/images_largescale/
+      imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/imagenet/test_inaturalist.txt
     openimageo:
-      data_dir: ./data/images_largescale/
-      imglist_pth: ./data/benchmark_imglist/imagenet/test_openimage_o.txt
+      data_dir: /h/nng/projects/OpenOOD/data/images_largescale/
+      imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/imagenet/test_openimage_o.txt

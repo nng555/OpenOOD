@@ -17,6 +17,9 @@ from .udg_dataset import UDGDataset
 def get_dataloader(config: Config):
     # prepare a dataloader dictionary
     dataset_config = config.dataset
+
+    subset = getattr(dataset_config, 'subset', -1)
+
     dataloader_dict = {}
     for split in dataset_config.split_names:
         split_config = dataset_config[split]
@@ -75,6 +78,10 @@ def get_dataloader(config: Config):
                 preprocessor=preprocessor,
                 data_aux_preprocessor=data_aux_preprocessor)
             sampler = None
+
+            if subset > 0 and split != 'train' and split != 'val':
+                nskip = int(1. / subset)
+                dataset = Subset(dataset, list(range(0, len(dataset), nskip)))
             #if dataset_config.num_gpus * dataset_config.num_machines > 1:
             #    sampler = torch.utils.data.distributed.DistributedSampler(
             #        dataset)
@@ -108,6 +115,7 @@ def get_dataloader(config: Config):
 def get_ood_dataloader(config: Config):
     # specify custom dataset class
     ood_config = config.ood_dataset
+    subset = getattr(ood_config, 'subset', -1)
     CustomDataset = eval(ood_config.dataset_class)
     dataloader_dict = {}
     for split in ood_config.split_names:
@@ -123,6 +131,9 @@ def get_ood_dataloader(config: Config):
                 num_classes=ood_config.num_classes,
                 preprocessor=preprocessor,
                 data_aux_preprocessor=data_aux_preprocessor)
+            if subset > 0:
+                nskip = int(1. / subset)
+                dataset = Subset(dataset, list(range(0, len(dataset), nskip)))
             dataloader = DataLoader(dataset,
                                     batch_size=ood_config.batch_size,
                                     shuffle=ood_config.shuffle,
@@ -140,6 +151,9 @@ def get_ood_dataloader(config: Config):
                     num_classes=ood_config.num_classes,
                     preprocessor=preprocessor,
                     data_aux_preprocessor=data_aux_preprocessor)
+                if subset > 0:
+                    nskip = int(1. / subset)
+                    dataset = Subset(dataset, list(range(0, len(dataset), nskip)))
                 dataloader = DataLoader(dataset,
                                         batch_size=ood_config.batch_size,
                                         shuffle=ood_config.shuffle,

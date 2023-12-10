@@ -7,3 +7,4 @@ network:
   use_bn: True
   bn_affine: True
   random_affine: False
+  residual: True

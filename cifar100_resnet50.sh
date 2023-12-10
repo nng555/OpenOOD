@@ -9,4 +9,6 @@ python3 ${HDIR}/main.py \
   ${HDIR}/configs/preprocessors/base_preprocessor.yml \
   --network.cifar True \
   --network.pretrained True \
-  --network.checkpoint /fs01/home/nng/slurm/2023-10-18/run_bash/cifar100,train/results/cifar100_resnet50_base_e51_lr0.004_default/s0/best.ckpt ${@:1}
+  --postprocessor.postprocessor_args.jac_chunk_size 1 \
+  --postprocessor.postprocessor_args.class_chunk_size 50 \
+  --network.checkpoint /h/nng/projects/OpenOOD/results/checkpoints/cifar100_res50.ckpt ${@:1}

@@ -1,8 +1,11 @@
 import torch
+import math
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim.optimizer import Optimizer
 import numpy as np
+
+from typing import Optional, Tuple
 
 class EKFAC(Optimizer):
 
@@ -10,7 +13,7 @@ class EKFAC(Optimizer):
                  sua=False, sud=False, layer_eps=True, eps_type='mean',
                  eigenscale=1.0, featskip=1, layerscale=1,
                  center=False, per_class_m1=False,
-                 nfeature_reduce=2000,
+                 nfeature_reduce=2000, nfeature_layer=50,
     ):
         """ EKFAC Preconditionner for Linear and Conv2d layers.
 
@@ -30,10 +33,7 @@ class EKFAC(Optimizer):
         self.eps = eps
         self.sua = sua
         self.sud = sud
-        self.params = []
-        self._fwd_handles = []
-        self._bwd_handles = []
-        self.numel = 0
+        assert (self.sua or self.sud), "Must assume one of SUA or SUD"
         self.layer_eps = layer_eps
         self.eps_type = eps_type
         self.eigenscale = eigenscale
@@ -43,13 +43,32 @@ class EKFAC(Optimizer):
         self.num_classes = num_classes
         self.per_class_m1 = per_class_m1
         self.spectrum_order = None
+        self.layer_order = {}
         self.nfeature_reduce = nfeature_reduce
+        self.nfeature_layer = nfeature_layer
 
         self._iteration_counter = 1
+        self.rebuild(net)
+
+        self.prev_hess = None
+        self.prev_weight = None
+        self.layer_act = None
+
+        self.shortcut_hess = None
+        self.shortcut_weight = None
+        self.shortcut_layer = None
+
+        self.transfer = []
+
+    def rebuild(self, net):
+        self.numel = 0
+        self.params = []
+        self._fwd_handles = []
+        self._bwd_handles = []
         for mod in net.modules():
             mod_class = mod.__class__.__name__
-            if mod_class in ['Linear', 'Conv2d', 'BatchNorm2d']:
-            #if mod_class in ['Linear', 'Conv2d']:
+            #if mod_class in ['Linear', 'Conv2d', 'BatchNorm2d']:
+            if mod_class in ['Linear', 'Conv2d']:
                 params = [mod.weight]
                 self.numel += mod.weight.numel()
                 if mod.bias is not None:
@@ -57,14 +76,37 @@ class EKFAC(Optimizer):
                     self.numel += mod.bias.numel()
                 d = {'params': params, 'mod': mod, 'layer_type': mod_class}
                 if mod_class == 'Conv2d':
-                    # Adding gathering filter for convolution
                     if not self.sua:
-                        d['gathering_filter_sua'] = self._get_gathering_filter(mod, sua=True)
+                        d['gathering_filter_sua'] = self._get_gathering_filter(mod)
                     if not self.sud:
-                        d['gathering_filter_sud'] = self._get_gathering_filter(mod, sua=False)
+                        d['gathering_filter_sud'] = self._get_gathering_filter(mod, channels=mod.out_channels, reverse=True)
+                    #d['x_autocorr_filter'] = self._get_autocorr_filter(mod, mod.in_channels)
+                    #d['gy_autocorr_filter'] = self._get_autocorr_filter(mod, mod.out_channels)
                 self.params.append(d)
 
         super(EKFAC, self).__init__(self.params, {})
+
+        for mod in net.modules():
+            mod_class = mod.__class__.__name__
+            if mod_class == 'Conv2d':
+                # Adding gathering filter for hessian
+                self.state[mod]['gathering_filter_hy'] = self._get_gathering_filter(mod, channels=mod.out_channels)
+
+    def get_thresh_and_idx(self, eigens, nfeatures):
+        eigens += self.eps
+        threshes = torch.logspace(torch.log(eigens.min()), torch.log(eigens.max()), nfeatures, math.e)
+        scatter_idx = torch.zeros_like(eigens).long()
+        pcum = len(scatter_idx)
+        scatter_idx = torch.zeros_like(eigens).long()
+        for t in threshes:
+            tcum = (eigens > t).sum()
+            if tcum == pcum:
+                continue
+            pcum = tcum
+            scatter_idx[eigens > t] += 1
+
+        return threshes, scatter_idx
+
 
     def get_spectrum(self):
         res = []
@@ -81,37 +123,53 @@ class EKFAC(Optimizer):
                 m2 = torch.cat((state['exact_fw'].flatten(), state['exact_fb'].flatten()))
             res.append(m2)
 
+            lthresh, lscatter_idx = self.get_thresh_and_idx(m2, self.nfeature_layer)
+            self.layer_order[weight] = [lthresh, lscatter_idx.max() + 1, lscatter_idx]
+
         if self.spectrum_order is None:
             full_spectrum = torch.cat(res)
-            self.spectrum_order = torch.argsort(full_spectrum)
-            self.bin_size = len(self.spectrum_order) // self.nfeature_reduce
-            if len(self.spectrum_order) % self.bin_size == 0:
-                self.pad_amount == 0
-            else:
-                self.pad_amount = (self.bin_size + 1) * self.nfeature_reduce - len(self.spectrum_order)
-                self.bin_size += 1
+            self.thresh, self.scatter_idx = self.get_thresh_and_idx(full_spectrum, self.nfeature_reduce)
+            print(f"Reducing features from {self.nfeature_reduce} to {self.scatter_idx.max()}")
+            self.nfeature_reduce = self.scatter_idx.max()
 
         return res
 
     def init_hooks(self, net):
         self.clear_hooks()
-        for mod in net.modules():
+        for name, mod in net.named_modules():
             mod_class = mod.__class__.__name__
-            if mod_class in ['Linear', 'Conv2d', 'BatchNorm2d']:
+            if mod_class in ['Linear', 'Conv2d']:
                 #handle = mod.register_forward_pre_hook(self._save_input)
                 #self._fwd_handles.append(handle)
+                #handle = mod.register_full_backward_hook(self._save_grad_output_and_hess(name))
                 handle = mod.register_full_backward_hook(self._save_grad_output)
                 self._bwd_handles.append(handle)
                 handle = mod.register_forward_hook(self._save_input_output)
                 self._fwd_handles.append(handle)
+            """
+            elif mod_class in ['ReLU', 'AdaptiveAvgPool2d', 'MaxPool2d']:
+                handle = mod.register_full_backward_hook(self._track_transfer)
+                self._bwd_handles.append(handle)
+            """
 
-    def step(self, update_stats=True, update_params=True, grads=None, inverse=True, l2=False, return_feats=False, labels=None):
+    def _track_transfer(self, mod, grad_input, grad_output):
+        self.transfer.append(mod)
+
+    def step(self, update_stats=True, update_params=True, grads=None, inverse=True, l2=False, return_feats=False, labels=None, layers=False, sandwich=False):
         """Performs one step of preconditioning."""
         assert not (labels is None and self.center), "Require labels for per class centering"
         nat_grads = {}
 
         eigenfeat = []
-        res = 0
+        layerfeat = []
+        if layers:
+            l2_norm = []
+            m1_norm = []
+            l1_norm = []
+        else:
+            m2_norm = 0
+            m1_norm = 0
+            l1_norm = 0
 
         scale = 1.
 
@@ -125,46 +183,55 @@ class EKFAC(Optimizer):
             state = self.state[weight]
             wgrad = bgrad = None
             if grads is not None:
-                wgrad = grads[weight]
+                wgrad, wname = grads[weight]
                 if bias is not None:
-                    bgrad = grads[bias]
+                    bgrad, bname = grads[bias]
 
-            if group['layer_type'] == 'Conv2d' and self.sua:
-                precond_fn = self._precond_sua_ra
+            if group['layer_type'] == 'Conv2d' and self.sua and self.sud:
+                precond_fn = self._precond_sua_sud_ra
             elif group['layer_type'] == 'BatchNorm2d':
-                precond_fn = self._precond_diag_ra
+                raise NotImplementedError
+                #precond_fn = self._precond_diag_ra
             else:
                 precond_fn = self._precond_ra
 
             # only one of grads or g_kfe should be set
             out = precond_fn(weight, bias, group, state, scale,
-                    g=wgrad, gb=bgrad, inverse=inverse, l2=l2, labels=labels)
+                    g=wgrad, gb=bgrad, inverse=inverse, l2=l2, labels=labels, sandwich=sandwich)
 
             if group['layer_type'] != 'BatchNorm2d':
                 scale *= self.layerscale
 
             if l2:
-                norm, g_kfe, nat_bgrad, nat_wgrad = out
-                res += norm
+                _l2_norm, _l1_norm, _m1_norm, g_kfe, nat_bgrad, nat_wgrad = out
+                if layers:
+                    l2_norm.append(_l2_norm)
+                    m1_norm.append(_m1_norm)
+                    l1_norm.append(_l1_norm)
+                else:
+                    l2_norm += _l2_norm
+                    l1_norm += _l1_norm
+                    m1_norm += _m1_norm
                 if return_feats:
+                    _, nfeatures, scatter_idx = self.layer_order[weight]
+                    _layerfeat = torch.scatter_add(torch.zeros(nfeatures).cuda(), 0, scatter_idx, g_kfe.flatten())
                     eigenfeat.append(g_kfe.flatten())
+                    layerfeat.append(_layerfeat)
             else:
                 nat_bgrad, nat_wgrad = out
 
             if nat_wgrad is not None:
-                nat_grads[weight] = nat_wgrad
+                nat_grads[wname] = nat_wgrad
                 if nat_bgrad is not None:
-                    nat_grads[bias] = nat_bgrad
+                    nat_grads[bname] = nat_bgrad
         if l2:
             if return_feats:
                 eigenfeat = torch.cat(eigenfeat)
-                eigenfeat = eigenfeat[self.spectrum_order]
-                # TODO: pad more elegantly to preserve magnitude of feature?
-                eigenfeat = torch.cat((eigenfeat, torch.zeros(self.pad_amount).cuda()))
-                eigenfeat = eigenfeat.view(-1, self.bin_size).mean(-1)
-                return nat_grads, res, eigenfeat
+                out = torch.zeros(self.nfeature_reduce + 1).cuda()
+                eigenfeat = torch.scatter_add(out, 0, self.scatter_idx, eigenfeat)
+                return nat_grads, l2_norm, l1_norm, m1_norm, eigenfeat, layerfeat
             else:
-                return nat_grads, res
+                return nat_grads, l2_norm, l1_norm, m1_norm
         else:
             return nat_grads
 
@@ -201,6 +268,108 @@ class EKFAC(Optimizer):
         """Saves grad on output of layer to compute covariance."""
         self.state[mod]['gy'] = grad_output[0].detach()
 
+    def _save_grad_output_and_hess(self, name):
+        def hook_fn(mod, grad_input, grad_output):
+            """Saves grad on output of layer to compute covariance."""
+            self.state[mod]['gy'] = grad_output[0].detach()
+
+            if isinstance(mod, nn.BatchNorm2d):
+                raise NotImplementedError
+
+            if 'shortcut' in name:
+                self.shortcut_layer = int(name.split('layer')[1].split('.')[0]) - 1
+
+            if self.prev_weight is None:
+                # top layer, just copy the output hessian
+                if 'hy' not in self.state[mod]:
+                    self.state[mod]['hy'] = self.prev_hess.sum(0)
+                else:
+                    self.state[mod]['hy'] += self.prev_hess.sum(0)
+            else:
+                # recurse the hessian calculation
+                j_act = self.state[mod]['y']
+
+                # manually backprop through transfer functions
+                for t_mod in self.transfer[::-1]:
+                    t_name = t_mod.__class__.__name__
+                    if t_name == 'AdaptiveAvgPool2d':
+                        j_act = j_act.mean(-1).mean(-1)
+
+                    elif t_name == 'ReLU':
+                        j_act = (j_act > 0).float()
+
+                    elif t_name == 'MaxPool2d':
+                        # divide by kernel size since we average over locations anyways
+                        j_act = t_mod(j_act) / t_mod.kernel_size**2
+
+                # TODO: reshape activations to filter patches?
+                """
+                if j_act.ndim == 4:
+                    if j_act.shape[-1] == 1 and j_act.shape[-2] == 1:
+                        j_act = j_act[..., 0, 0]
+                    else:
+                        j_act = F.conv2d(j_act, self.state[mod]['gathering_filter_hy'],
+                                         stride=self.prev_mod.stride, padding=self.prev_mod.padding,
+                                         groups=self.prev_mod.in_channels) # B x DKK x HW
+                        j_act = j_act.mean(-1).mean(-1)
+
+                # TODO: if conv reshape weight to IKK x O, average across filter?
+                if self.prev_weight.ndim == 4:
+                    O, I, K, _ = self.prev_weight.shape
+                    self.prev_weight = self.prev_weight.view(self.prev_weight.shape[0], -1)
+                    hfactor = torch.matmul(torch.diag_embed(j_act), self.prev_weight.transpose(-1, -2))
+                    hfactor = hfactor.view(hfactor.shape[0], I, K, K, hfactor.shape[-1]).mean(2).mean(2)
+                else:
+                    hfactor = torch.matmul(torch.diag_embed(j_act), self.prev_weight.transpose(-1, -2))
+                """
+                if j_act.ndim == 4:
+                    j_act = j_act.mean(-1).mean(-1)
+
+                if self.prev_weight.ndim == 4:
+                    self.prev_weight = self.prev_weight.mean(-1).mean(-1)
+
+                hfactor = torch.matmul(torch.diag_embed(j_act), self.prev_weight.transpose(-1, -2))
+
+                hess = torch.bmm(torch.bmm(hfactor, self.prev_hess), hfactor.transpose(-1, -2))
+
+                # hack to keep track of hessians from the shortcut connection
+                if self.shortcut_layer is not None and name == 'layer' + str(self.shortcut_layer) + '.1.conv2':
+                    # assume only relu on shortcut connection
+
+                    if self.shortcut_weight.ndim == 4:
+                        self.shortcut_weight = self.shortcut_weight.mean(-1).mean(-1)
+
+                    s_hfactor = torch.matmul(torch.diag_embed(j_act), self.shortcut_weight.transpose(-1, -2))
+                    s_hess = torch.bmm(torch.bmm(s_hfactor, self.shortcut_hess), s_hfactor. transpose(-1, -2))
+                    hess += s_hess
+                    self.shortcut_hess = None
+                    self.shortcut_weight = None
+                    self.shortcut_layer = None
+
+                if 'hy' not in self.state[mod]:
+                    self.state[mod]['hy'] = hess.sum(0)
+                else:
+                    self.state[mod]['hy'] += hess.sum(0)
+
+                if 'shortcut' in name:
+                    self.shortcut_hess = hess
+                else:
+                    self.prev_hess = hess
+
+
+            prev_weight = mod.weight.detach()
+            self.prev_act = self.state[mod]['x']
+            if 'shortcut' in name:
+                self.shortcut_weight = prev_weight
+            else:
+                self.prev_weight = prev_weight
+
+            self.transfer = []
+            self.prev_mod = mod
+
+        return hook_fn
+
+
     def _save_input_output(self, mod, i, o):
         self.state[mod]['x'] = i[0].detach()
         self.state[mod]['y'] = o.detach()
@@ -231,45 +400,66 @@ class EKFAC(Optimizer):
         return m2, eps
 
     def _precond_ra(self, weight, bias, group, state, scale,
-            g=None, gb=None, inverse=True, l2=False, labels=None):
+            g=None, gb=None, inverse=True, l2=False, labels=None, sandwich=False):
         """Applies preconditioning."""
         res = []
         kfe_x = state['kfe_x']
         kfe_gy = state['kfe_gy']
+        #kfe_hy = state['kfe_hy']
         m2 = state['m2']
+        m1 = state['m1']
         if g is None:
             g = weight.grad.data.unsqueeze(0)
         s = g.shape
         #bs = self.state[group['mod']]['x'].size(0)
         if group['layer_type'] == 'Conv2d':
-            g = g.contiguous().view(s[0], s[1], s[2]*s[3]*s[4])
+            if not self.sud:
+                g = g.contiguous().permute(0, 1, 3, 4, 2).reshape(s[0], s[1]*s[3]*s[4], s[2]) # B x OHW x I
+            elif not self.sua:
+                g = g.contiguous().view(s[0], s[1], s[2]*s[3]*s[4]) # B x O x IHW
+            else:
+                raise NotImplementedError
+
         if bias is not None:
             if gb is None:
-                gb = bias.grad.data.unsqueeze(0)
-            g = torch.cat([g, gb.view(gb.shape[0], gb.shape[1], 1)], dim=2)
+                gb = bias.grad.data.unsqueeze(0) # B x O
+            if group['layer_type'] == 'Conv2d' and not self.sud:
+                g = torch.cat([g, gb.view(s[0], s[1], 1, 1).expand(1, s[1], s[3], s[4]).reshape(s[0], -1, 1)], dim=2) # B x OHW x (I + 1)
+            else:
+                g = torch.cat([g, gb.view(gb.shape[0], gb.shape[1], 1)], dim=2) # B X O x (IHW + 1)
 
-        g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
-        if self.per_class_m1:
-            means = torch.take_along_dim(state['m1'], labels.view(*([-1] + [1] * (g_kfe.ndim - 1))), 0)
-            g_kfe -= means
+        if sandwich:
+            hm2, eps = self.get_m2_and_eps(state['hm2'], self.eps)
+            g_kfe = torch.matmul(torch.matmul(kfe_hy.t(), g), kfe_x)
+            g_kfe = g_kfe / (hm2 + eps)
+            g_kfe = torch.matmul(torch.matmul(kfe_hy, g_kfe), kfe_x.t())
+            g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
+        else:
+            g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
 
         m2, eps = self.get_m2_and_eps(m2, self.eps)
         m2 *= scale
+
         # layerwise multiplicative damping
         if inverse:
             if l2:
-                res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() / self.numel)
-                res.append(g_kfe**2)
+                res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() )
+                res.append((g_kfe**2 * self.eigenscale / torch.sqrt(m2 + eps)).sum())
+                res.append((g_kfe * m1 * self.eigenscale / (m2 + eps)).sum())
+                res.append(g_kfe**2 * self.eigenscale / (m2 + eps) )
             g_nat_kfe = g_kfe * self.eigenscale / (m2 + eps)
         else:
             if l2:
-                res.append((g_kfe**2 * (m2 + eps) * self.eigenscale).sum() / self.numel)
-                res.append(g_kfe**2)
-            g_nat_kfe = g_kfe * ((m2 + eps) * self.eigenscale)
+                res.append((g_kfe**2 * self.eigenscale * (m2 + eps)).sum() )
+                res.append(torch.sum(g_kfe**2 * self.eigenscale * torch.sqrt(m2 + eps)))
+                res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
+                res.append(g_kfe**2 * self.eigenscale * (m2 + eps) )
+            g_nat_kfe = g_kfe * self.eigenscale * (m2 + eps)
 
         g_nat = torch.matmul(torch.matmul(kfe_gy, g_nat_kfe), kfe_x.t())
 
-        if bias is not None:
+        # just skip for sud since we really don't care about the parameter space...
+        if bias is not None and self.sud:
             gb = g_nat[:, :, -1].contiguous().view(s[0], *bias.shape)
             if bias.grad is not None:
                 bias.grad.data = gb
@@ -280,22 +470,27 @@ class EKFAC(Optimizer):
         else:
             res.append(None)
 
-        g_nat = g_nat.contiguous().view(*s)
-        if weight.grad is not None:
-            weight.grad.data = g_nat
+        if not self.sud:
             res.append(None)
         else:
-            res.append(g_nat)
+            g_nat = g_nat.contiguous().view(*s)
+            if weight.grad is not None:
+                weight.grad.data = g_nat
+                res.append(None)
+            else:
+                res.append(g_nat)
 
         return res
 
-    def _precond_sua_ra(self, weight, bias, group, state, scale,
-            g=None, gb=None, inverse=True, l2=False, labels=None):
+    def _precond_sua_sud_ra(self, weight, bias, group, state, scale,
+            g=None, gb=None, inverse=True, l2=False, labels=None, sandwich=False):
         """Preconditioning for KFAC SUA."""
         res = []
         kfe_x = state['kfe_x']
         kfe_gy = state['kfe_gy']
+        #kfe_hy = state['kfe_hy']
         m2 = state['m2']
+        m1 = state['m1']
         if g is None:
             g = weight.grad.data.unsqueeze(0)
         s = g.shape
@@ -307,23 +502,32 @@ class EKFAC(Optimizer):
             gb = gb.view(s[0], -1, 1, 1, 1).expand(-1, -1, -1, s[3], s[4])
             g = torch.cat([g, gb], dim=2)
 
-        g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
-        if self.per_class_m1:
-            means = torch.take_along_dim(state['m1'], labels.view(*([-1] + [1] * (g_kfe.ndim - 1))), 0)
-            g_kfe -= means
+        if sandwich:
+            hm2, eps = self.get_m2_and_eps(state['hm2'], self.eps)
+            g_kfe = self._to_kfe_sua(g, kfe_x, kfe_hy)
+            g_kfe = g_kfe / (hm2 + eps)
+            g_kfe = self._to_kfe_sua(g_kfe, kfe_x.t(), kfe_hy.t())
+            g_kfe = self._to_kfe_sua(g_kfe, kfe_x, kfe_gy)
+        else:
+            g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
+
         m2, eps = self.get_m2_and_eps(m2, self.eps)
         m2 *= scale
 
         if inverse:
             if l2:
-                res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() / self.numel)
-                res.append(g_kfe**2)
+                res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() )
+                res.append(torch.sum(g_kfe * self.eigenscale / torch.sqrt(m2 + eps)))
+                res.append((g_kfe * m1 * self.eigenscale / (m2 + eps)).sum() )
+                res.append(g_kfe**2 * self.eigenscale / (m2 + eps) )
             g_nat_kfe = g_kfe * self.eigenscale / (m2 + eps)
         else:
             if l2:
-                res.append((g_kfe**2 * (m2 + eps) * self.eigenscale).sum() / self.numel)
-                res.append(g_kfe**2)
-            g_nat_kfe = g_kfe * ((m2 + eps) * self.eigenscale)
+                res.append((g_kfe**2 * self.eigenscale * (m2 + eps)).sum() )
+                res.append(torch.sum(g_kfe * self.eigenscale * torch.sqrt(m2 + eps)))
+                res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
+                res.append(g_kfe**2 * self.eigenscale * (m2 + eps) )
+            g_nat_kfe = g_kfe * self.eigenscale * (m2 + eps)
 
         g_nat = self._to_kfe_sua(g_nat_kfe, kfe_x.t(), kfe_gy.t())
         if bias is not None:
@@ -345,6 +549,7 @@ class EKFAC(Optimizer):
 
         return res
 
+    """
     def _precond_diag_ra(self, weight, bias, group, state, scale,
             g=None, gb=None, inverse=True, l2=False, labels=None):
         res = []
@@ -386,11 +591,11 @@ class EKFAC(Optimizer):
                     gb_nat_raw = gb**2
                 gb_nat = gb * ((fb + eps) * self.eigenscale)
 
-                if bias.grad is not None:
-                    bias.grad.data = gb_nat.squeeze()
-                    res.append(None)
-                else:
-                    res.append(gb_nat)
+            if bias.grad is not None:
+                bias.grad.data = gb_nat.squeeze()
+                res.append(None)
+            else:
+                res.append(gb_nat)
         else:
             res.append(None)
 
@@ -404,9 +609,16 @@ class EKFAC(Optimizer):
         else:
             res.append(g_nat)
 
+        if l2:
+            res = [res[1], res[2], res[0], res[3]]
+
         return res
+    """
 
     def update_cache(self, op, **kwargs):
+        # return things if we need to
+        res = []
+
         for group in self.param_groups:
             if len(group['params']) == 2:
                 weight, bias = group['params']
@@ -424,26 +636,31 @@ class EKFAC(Optimizer):
                 else:
                     state['xxt'] /= weight
                     state['ggt'] /= weight
+                    #state['hy'] = self.state[group['mod']]['hy'] / weight
 
             elif op == 'average_moments':
                 assert 'weight' in kwargs, "Must provied weight"
                 weight = kwargs['weight']
+                moment = kwargs.get('moment', None)
                 if group['layer_type'] != 'BatchNorm2d':
-                    state['m2'] /= weight
+                    if moment == 2:
+                        state['m2'] /= weight
+                    elif moment == 1:
+                        state['m1'] /= weight
+                    else:
+                        raise NotImplementedError
 
             elif op == 'average_means':
                 assert 'weight' in kwargs, "Must provied weight"
                 weight = kwargs['weight']
-                if group['layer_type'] == 'BatchNorm2d':
-                    state['mean_fw'] /= weight
-                    state['mean_fb'] /= weight
-                else:
-                    if group['layer_type'] == 'Conv2d':
-                        weight = weight[:, None, None]
-                    else:
-                        weight = weight[:, None]
-                    state['xu'] /= weight
-                    state['gyu'] /= weight
+                if group['layer_type'] == 'Conv2d':
+                    state['ex'] /= weight
+                    state['ex2'] /= weight
+                    state['xvar'] = state['ex2'] - state['ex']**2
+                    state['egy'] /= weight
+                    state['egy2'] /= weight
+                    state['gyvar'] = state['egy2'] - state['egy']**2
+                    res.append([state['ex'], state['xvar']])
 
             elif op == 'state':
                 ex_weight = kwargs.get('ex_weight', None)
@@ -461,17 +678,18 @@ class EKFAC(Optimizer):
                 else:
                     self._update_block(group, state, ex_weight=ex_weight, labels=labels, mean=True)
 
-            elif op == 'moments':
+            elif 'moments' in op:
                 ex_weight = kwargs.get('ex_weight', None)
                 grads = kwargs.get('grads', None)
                 labels = kwargs.get('labels', None)
+                moment = kwargs.get('moment', None)
                 g = gb = None
                 if grads is not None:
                     g = grads[weight]
                     if bias is not None:
                         gb = grads[bias]
                 if group['layer_type'] != 'BatchNorm2d':
-                    self._update_block_moments(group, state, g=g, gb=gb, ex_weight=ex_weight, labels=labels)
+                    self._update_block_moments(group, state, moment, g=g, gb=gb, ex_weight=ex_weight, labels=labels)
 
             elif op == 'basis':
                 if group['layer_type'] != "BatchNorm2d":
@@ -499,6 +717,8 @@ class EKFAC(Optimizer):
             else:
                 raise Exception(f"Operation {op} not supported")
 
+        return res
+
     def print_eigens(self):
         print(f"Total number of KFAC params: {self.numel}")
         self.update_cache('print')
@@ -506,35 +726,44 @@ class EKFAC(Optimizer):
     # 0. accumulate mean activation/output gradients
     def update_mean(self, ex_weight=None, labels=None):
         assert not (self.center and labels is None), "Need labels to calculate per class averages"
-        self.update_cache('mean', ex_weight=ex_weight, labels=labels)
+        return self.update_cache('mean', ex_weight=ex_weight, labels=labels)
 
     def average_means(self, weight):
-        self.update_cache('average_means', weight=weight)
+        return self.update_cache('average_means', weight=weight)
 
     # 1. accumulate average activation/output gradient covariance across batches
     def update_state(self, ex_weight=None, labels=None):
         assert not (self.center and labels is None), "Need labels to calculate per class BN moments"
-        self.update_cache('state', ex_weight=ex_weight, labels=labels)
+        return self.update_cache('state', ex_weight=ex_weight, labels=labels)
 
     # 2. average state across batches
     def average_state(self, weight):
-        self.update_cache('average_state', weight=weight)
+        return self.update_cache('average_state', weight=weight)
 
     # 3. compute eigenbasis from state
     def compute_basis(self):
-        self.update_cache('basis')
+        return self.update_cache('basis')
 
     # 4. reaccumulate second moments
-    def update_moments(self, grads=None, ex_weight=None, labels=None):
+    def update_second_moments(self, grads=None, ex_weight=None, labels=None):
         assert not (self.center and labels is None), "Need labels to calculate per class eigen moments"
-        self.update_cache('moments', grads=grads, ex_weight=ex_weight, labels=labels)
+        return self.update_cache('moments', grads=grads, ex_weight=ex_weight, labels=labels, moment=2)
+
+    # 4a. reaccumulate first moments for validation data
+    def update_first_moments(self, grads=None, ex_weight=None, labels=None):
+        assert not (self.center and labels is None), "Need labels to calculate per class eigen moments"
+        return self.update_cache('moments', grads=grads, ex_weight=ex_weight, labels=labels, moment=1)
 
     # 5. average second moments
-    def average_moments(self, weight):
-        self.update_cache('average_moments', weight=weight)
+    def average_second_moments(self, weight):
+        return self.update_cache('average_moments', weight=weight, moment=2)
+
+    # 5a. average first moments
+    def average_first_moments(self, weight):
+        return self.update_cache('average_moments', weight=weight, moment=1)
 
     def remove_top_moments(self, nremove):
-        self.update_cache('remove', nremove=nremove)
+        return self.update_cache('remove', nremove=nremove)
 
     def _update_diagonal(self, group, state, ex_weight=None, labels=None, mean=False):
         mod = group['mod']
@@ -582,19 +811,44 @@ class EKFAC(Optimizer):
         mod = group['mod']
         x = self.state[group['mod']]['x']
         gy = self.state[group['mod']]['gy']
+
+        if group['layer_type'] == 'Conv2d':
+            state['num_locations'] = x.shape[2] * x.shape[3]
+        else:
+            state['num_locations'] = 1
+
         if ex_weight is None:
             ex_weight = torch.ones(len(x)).cuda()
 
         # Computation of xxt
         if group['layer_type'] == 'Conv2d':
+            nlocations = x.shape[-1] * x.shape[-2]
+
+            # expand channel dimension by filter size
+            """
+            x_first = x[:, :1] # grab only first feature layer
+            x_patches = F.conv2d(x, group['x_autocorr_filter'], padding='same',
+                         groups=mod.in_channels) # B x DKK x HW
+            x_patches = x_patches[:, :49] # grab first feature patches
+            x_first = x_first * ex_weight.view(*([-1] + [1] * (x_first.ndim - 1))).expand_as(x_first)
+            x_patches = x_patches * ex_weight.view(*([-1] + [1] * (x_patches.ndim - 1))).expand_as(x_patches)
+            x_first = x_first.transpose(0, 1).reshape(x_first.shape[1], -1)
+            x_patches = x_patches.transpose(0, 1).reshape(x_patches.shape[1], -1)
+            autocorr = torch.mm(x_first, x_patches.t()) / float(x_patches.shape[1])
+            if 'x_autocorr' not in state:
+                state['x_autocorr'] = autocorr
+            else:
+                state['x_autocorr'] += autocorr
+            """
+
             if not self.sua:
-                # expand channel dimension by filter size
                 x = F.conv2d(x, group['gathering_filter_sua'],
                              stride=mod.stride, padding=mod.padding,
                              groups=mod.in_channels) # B x DKK x HW
             x = x.reshape(x.shape[0], x.shape[1], -1) # B x D x HW, accumulate along BHW
         else:
             x = x.data # B x D
+            nlocations = 1
 
         # cat bias 1 along D
         if mod.bias is not None:
@@ -604,13 +858,16 @@ class EKFAC(Optimizer):
         # accumulate activation mean
         if mean:
             if group['layer_type'] == 'Conv2d':
-                x = x * ex_weight[:, None, None]
-            else:
-                x = x * ex_weight[:, None]
-            indices = labels.view(*([-1] + [1] * (x.ndim - 1))).expand_as(x)
-            if 'xu' not in state:
-                state['xu'] = torch.zeros((self.num_classes, *x.shape[1:])).cuda()
-            state['xu'].scatter_add_(0, indices, x) # acumulate D x HW
+                if 'ex' not in state:
+                    # B x D * B x 1
+                    state['ex'] = (x.mean(-1) * ex_weight[:, None]).sum(0)
+                else:
+                    state['ex'] += (x.mean(-1) * ex_weight[:, None]).sum(0)
+
+                if 'ex2' not in state:
+                    state['ex2'] = ((x**2).mean(-1) * ex_weight[:, None]).sum(0)
+                else:
+                    state['ex2'] += ((x**2).mean(-1) * ex_weight[:, None]).sum(0)
 
         # accumulate activation second moments
         else:
@@ -628,33 +885,55 @@ class EKFAC(Optimizer):
                 x = x.t() # D x B for linear
                 xw = xw.t()
 
-            xxt = torch.mm(xw, x.t()) / float(x.shape[1])
+            xxt = torch.mm(xw, x.t()) / nlocations
             if 'xxt' not in state:
                 state['xxt'] = xxt
             else:
                 state['xxt'] += xxt
 
+
         # Computation of ggt
         if group['layer_type'] == 'Conv2d':
+            # expand channel dimension by filter size
+            """
+            gy_first = gy[:, :1] # grab only first feature layer
+            gy_patches = F.conv2d(gy, group['gy_autocorr_filter'], padding='same',
+                         groups=mod.out_channels) # B gy DKK gy HW
+            gy_patches = gy_patches[:, :49] # grab first feature patches
+            gy_first = gy_first * ex_weight.view(*([-1] + [1] * (gy_first.ndim - 1))).expand_as(gy_first)
+            gy_patches = gy_patches * ex_weight.view(*([-1] + [1] * (gy_patches.ndim - 1))).expand_as(gy_patches)
+            gy_first = gy_first.transpose(0, 1).reshape(gy_first.shape[1], -1)
+            gy_patches = gy_patches.transpose(0, 1).reshape(gy_patches.shape[1], -1)
+            autocorr = torch.mm(gy_first, gy_patches.t()) / float(gy_patches.shape[1])
+            if 'gy_autocorr' not in state:
+                state['gy_autocorr'] = autocorr
+            else:
+                state['gy_autocorr'] += autocorr
+            """
+            nlocations = gy.shape[-1] * gy.shape[-2]
             if not self.sud:
-                # expand channel dimension by filter size
                 gy = F.conv2d(gy, group['gathering_filter_sud'],
-                             stride=mod.stride, padding=mod.padding,
-                             groups=mod.out_channels)
+                              stride=1, padding='same',
+                              groups=mod.out_channels) # B x DKK x HW
+
             gy = gy.reshape(gy.shape[0], gy.shape[1], -1) # B x D x HW
         else:
+            nlocations = 1
             gy = gy.data
 
         # accumulate output gradient mean
         if mean:
             if group['layer_type'] == 'Conv2d':
-                gy = gy * ex_weight[:, None, None]
-            else:
-                gy = gy * ex_weight[:, None]
-            indices = labels.view(*([-1] + [1] * (gy.ndim - 1))).expand_as(gy)
-            if 'gyu' not in state:
-                state['gyu'] = torch.zeros((self.num_classes, *gy.shape[1:])).cuda() # K x D x HW for conv
-            state['gyu'].scatter_add_(0, indices, gy)
+                if 'egy' not in state:
+                    # B x D * B x 1
+                    state['egy'] = (gy.mean(-1) * ex_weight[:, None]).sum(0)
+                else:
+                    state['egy'] += (gy.mean(-1) * ex_weight[:, None]).sum(0)
+
+                if 'egy2' not in state:
+                    state['egy2'] = ((gy**2).mean(-1) * ex_weight[:, None]).sum(0)
+                else:
+                    state['egy2'] += ((gy**2).mean(-1) * ex_weight[:, None]).sum(0)
 
         # accumulate output gradient second moments
         else:
@@ -671,95 +950,113 @@ class EKFAC(Optimizer):
             else:
                 gy = gy.t() # D x B for linear
                 gyw = gyw.t()
-            ggt = torch.mm(gyw, gy.t()) / float(gy.shape[1])
+
+            # average over locations but sum over batches
+            ggt = torch.mm(gyw, gy.t()) / nlocations
+
             if 'ggt' not in state:
                 state['ggt'] = ggt
             else:
                 state['ggt'] += ggt
 
-    def _update_block_moments(self, group, state, g=None, gb=None, ex_weight=None, labels=None):
+    def _update_block_moments(self, group, state, moment, g=None, gb=None, ex_weight=None, labels=None):
         """refit second moments"""
         # g and gb will have an extra batch dimension!!
         isconv = group['layer_type'] == 'Conv2d'
         kfe_x = state['kfe_x']
         kfe_gy = state['kfe_gy']
+        #kfe_hy = state['kfe_hy']
         if g is None:
             g = group['params'][0].grad.data.unsqueeze(0)
         s = g.shape
         mod = group['mod']
+
         if isconv and not self.sua:
-            g = g.contiguous().view(s[0], s[1], s[2]*s[3]*s[4])
+            g = g.contiguous().view(s[0], s[1], s[2]*s[3]*s[4]) # B x O x IHW
+
+        if isconv and not self.sud:
+            g = g.contiguous().permute(0, 1, 3, 4, 2).reshape(s[0], s[1]*s[3]*s[4], s[2]) # B x OHW x I
+
         if len(group['params']) == 2:
             if gb is None:
-                gb = group['params'][1].grad.data.unsqueeze(0)
-            if isconv and self.sua:
+                gb = group['params'][1].grad.data.unsqueeze(0) # B x O
+            if isconv and not self.sua:
+                gb = gb.view(s[0], -1, 1)
+                g = torch.cat([g, gb], dim=2) # B x O x (IHW + 1)
+            elif isconv and not self.sud:
+                gb = gb.view(s[0], -1, 1, 1, 1).expand(-1, -1, s[3], s[4], -1).reshape(s[0], s[1]*s[3]*s[4], 1) # B x OHW x 1
+                g = torch.cat([g, gb], dim=2) # B x OHW x (I+1)
+            elif isconv and self.sua:
                 gb = gb.view(s[0], -1, 1, 1, 1).expand(-1, -1, -1, s[3], s[4])
                 g = torch.cat([g, gb], dim=2)
             else:
                 g = torch.cat([g, gb.view(gb.shape[0], gb.shape[1], 1)], dim=2)
-        if isconv and self.sua:
+
+        if isconv and self.sua and self.sud:
             g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
+            #h_kfe = self._to_kfe_sua(g, kfe_x, kfe_hy)
         else:
             g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
+            #h_kfe = torch.matmul(torch.matmul(kfe_hy.t(), g), kfe_x)
 
         if ex_weight is None:
             ex_weight = torch.ones(g_kfe.shape[0]).cuda()
         ex_weight = ex_weight.view(-1, *(1,) * (g_kfe.ndim - 1))
 
-        if 'm2' not in state:
-            state['m2'] = (g_kfe.detach()**2 * ex_weight).sum(0)
+        if moment == 2:
+            if 'm2' not in state:
+                state['m2'] = (g_kfe.detach()**2 * ex_weight).sum(0)
+            else:
+                state['m2'] += (g_kfe.detach()**2 * ex_weight).sum(0)
+        elif moment == 1:
+            if 'm1' not in state:
+                state['m1'] = (g_kfe * ex_weight).sum(0)
+            else:
+                state['m1'] += (g_kfe * ex_weight).sum(0)
         else:
-            state['m2'] += (g_kfe.detach()**2 * ex_weight).sum(0)
+            raise NotImplementedError
 
         """
-        if self.per_class_m1:
-            m1_kfe = g_kfe.detach() * ex_weight
-            indices = labels.view(*([-1] + [1] * (m1_kfe.ndim - 1))).expand_as(m1_kfe)
-            if 'm1' not in state:
-                state['m1'] = torch.zeros((self.num_classes, *m1_kfe.shape[1:])).cuda()
-            state['m1'].scatter_add_(0, indices, m1_kfe)
+        if 'hm2' not in state:
+            state['hm2'] = (h_kfe.detach()**2 * ex_weight).sum(0)
         else:
-            if 'm1' not in state:
-                state['m1'] = (g_kfe.detach() * ex_weight).sum(0)
-            else:
-                state['m1'] += (g_kfe.detach() * ex_weight).sum(0)
+            state['hm2'] += (h_kfe.detach()**2 * ex_weight).sum(0)
         """
+
 
     def _compute_block_basis(self, group, state, skip_m2=True):
         """computes eigendecomposition."""
         xxt = state['xxt']
-        _, state['kfe_x'] = torch.linalg.eigh(xxt.cpu(), UPLO='U')
+        _, state['kfe_x'] = torch.linalg.eigh(xxt, UPLO='U')
         state['kfe_x'] = state['kfe_x'].cuda()
 
         ggt = state['ggt']
         _, state['kfe_gy'] = torch.linalg.eigh(ggt, UPLO='U')
         state['kfe_gy'] = state['kfe_gy'].cuda()
 
-        """
-        if not skip_m2:
-            state['m2'] = Eg.unsqueeze(1) * Ex.unsqueeze(0) * state['num_locations']
-            #print(mod)
-            #print(f"Max Eigenvalue: {state['m2'].max()}, Min Eigenvalue: {state['m2'].min()}, Mean Eigenvalue: {state['m2'].mean()}")
-            if group['layer_type'] == 'Conv2d' and self.sua:
-                ws = group['params'][0].grad.data.size()
-                state['m2'] = state['m2'].view(Eg.size(0), Ex.size(0), 1, 1).expand(-1, -1, ws[2], ws[3])
-        """
+    def _get_autocorr_filter(self, mod, channels):
+        return self._get_gathering_filter(mod, channels, 7, 7)
 
-    def _get_gathering_filter(self, mod, sua=True):
+    def _get_gathering_filter(self, mod, channels=None, kw=None, kh=None, reverse=False):
         """Convolution filter that extracts input patches."""
-        kw, kh = mod.kernel_size
-        if sua:
-            g_filter = mod.weight.data.new(kw * kh * mod.in_channels, 1, kw, kh)
-        else:
-            g_filter = mod.weight.data.new(kw * kh * mod.out_channels, 1, kw, kh)
+        if channels is None:
+            channels = mod.in_channels
+        if kw is None:
+            kw = mod.kernel_size[0]
+        if kh is None:
+            kh = mod.kernel_size[1]
+        g_filter = mod.weight.data.new(kw * kh * channels, 1, kw, kh)
         g_filter.fill_(0)
-        for i in range(mod.in_channels):
+        for i in range(channels):
             for j in range(kw):
                 for k in range(kh):
-                    g_filter[k + kh*j + kw*kh*i, 0, j, k] = 1
+                    if reverse:
+                        g_filter[(kh - 1 - k) + kh*(kw - 1 - j) + kw*kh*i, 0, j, k] = 1
+                    else:
+                        g_filter[k + kh*j + kw*kh*i, 0, j, k] = 1
         return g_filter
 
-    def _to_kfe_sua(self, g, vx, vg):
+    def _to_kfe_sua(self, g, vx, vg): # B x O x I x H x W, I x I, O x O
         """Project g to the kfe"""
         # NOTE: g includes an extra first dimension for classes
         sg = g.size()

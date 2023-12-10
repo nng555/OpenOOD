@@ -19,6 +19,8 @@ from .dropout_net import DropoutNet
 from .dsvdd_net import build_network
 from .godin_net import GodinNet
 from .lenet import LeNet
+from .mlp import MLP
+from .nin import NIN
 from .mcd_net import MCDNet
 from .npos_net import NPOSNet
 from .openmax_net import OpenMax
@@ -32,6 +34,7 @@ from .resnet18_256x256 import ResNet18_256x256
 from .resnet50 import ResNet50
 from .rot_net import RotNet
 from .udg_net import UDGNet
+from .vgg import vgg11, vgg11_bn, vgg13, vgg13_bn, vgg16, vgg16_bn, vgg19, vgg19_bn
 from .vit_b_16 import ViT_B_16
 from .wrn import WideResNet
 from .rts_net import RTSNet
@@ -45,7 +48,12 @@ def get_network(network_config):
         use_bn = network_config.use_bn
         bn_affine = network_config.bn_affine
         random_affine = network_config.random_affine
-        net = ResNet18_32x32(num_classes=num_classes, use_bn=use_bn, bn_affine=bn_affine, random_affine=random_affine)
+        residual = network_config.residual
+        net = ResNet18_32x32(num_classes=num_classes, use_bn=use_bn, bn_affine=bn_affine, random_affine=random_affine, residual=residual)
+
+    elif network_config.name == 'nin':
+        use_bn = network_config.use_bn
+        net = NIN(num_classes=num_classes, use_bn=use_bn)
 
     elif network_config.name == 'resnet18_256x256':
         net = ResNet18_256x256(num_classes=num_classes)
@@ -62,6 +70,42 @@ def get_network(network_config):
 
     elif network_config.name == 'lenet':
         net = LeNet(num_classes=num_classes, num_channel=3)
+
+    elif network_config.name == 'vgg':
+        nlayers = network_config.num_layers
+        use_bn = network_config.use_bn
+
+        if nlayers == 11:
+            if use_bn:
+                net = vgg11_bn(num_classes)
+            else:
+                net = vgg11(num_classes)
+        if nlayers == 13:
+            if use_bn:
+                net = vgg13_bn(num_classes)
+            else:
+                net = vgg13(num_classes)
+        if nlayers == 16:
+            if use_bn:
+                net = vgg16_bn(num_classes)
+            else:
+                net = vgg16(num_classes)
+        if nlayers == 19:
+            if use_bn:
+                net = vgg19_bn(num_classes)
+            else:
+                net = vgg19(num_classes)
+
+    elif network_config.name == 'mlp':
+        im_size = network_config.im_size
+        num_layers = network_config.num_layers
+        feature_size = network_config.feature_size
+        net = MLP(num_classes=num_classes,
+                  im_size=im_size,
+                  num_layers=num_layers,
+                  feature_size=feature_size,
+        )
+
 
     elif network_config.name == 'wrn':
         net = WideResNet(depth=28,

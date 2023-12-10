@@ -46,7 +46,13 @@ class OODEvaluator(BaseEvaluator):
             self.hyperparam_search(net, id_data_loaders['val'],
                                    ood_data_loaders['val'], postprocessor)
 
-        print(f'Performing inference on {dataset_name} dataset...', flush=True)
+        print(f'Performing inference on ood val dataset...', flush=True)
+        vid_pred, vid_conf, vid_gt, vid_extra = postprocessor.inference(
+            net, ood_data_loaders['val'])
+        if self.config.recorder.save_scores:
+            self._save_scores(vid_pred, vid_conf, vid_gt, vid_extra, 'ood_val')
+
+        print(f'Performing inference on {dataset_name} test dataset...', flush=True)
         id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
             net, id_data_loaders['test'])
         if self.config.recorder.save_scores:
@@ -79,6 +85,7 @@ class OODEvaluator(BaseEvaluator):
                        ood_data_loaders,
                        postprocessor,
                        ood_split='farood')
+
 
     def _eval_ood(self,
                   net: nn.Module,

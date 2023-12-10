@@ -1,6 +1,5 @@
 from torchvision.models.swin_transformer import SwinTransformer
 
-
 class Swin_T(SwinTransformer):
     def __init__(self,
                  patch_size=[4, 4],

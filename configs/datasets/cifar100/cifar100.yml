@@ -10,6 +10,7 @@ dataset:
   num_workers: '@{num_workers}'
   num_gpus: '@{num_gpus}'
   num_machines: '@{num_machines}'
+  subset: -1.0
 
   split_names: [train, val, test]
 

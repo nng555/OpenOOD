@@ -44,21 +44,24 @@ class BasePostprocessor:
             else:
                 pred, conf, extra = res
 
-            pred_list.append(pred.cpu())
-            conf_list.append(conf.cpu())
-            label_list.append(label.cpu())
+            pred_list.append(pred)
+            conf_list.append(conf)
+            label_list.append(label.cpu().numpy())
 
             if extra is not None:
                 for k, v in extra.items():
-                    extras[k].append(v.cpu())
+                    extras[k].append(v)
 
         # convert values into numpy array
-        pred_list = torch.cat(pred_list).numpy().astype(int)
-        conf_list = torch.cat(conf_list).numpy()
-        label_list = torch.cat(label_list).numpy().astype(int)
+        pred_list = np.concatenate(pred_list).astype(int)
+        conf_list = np.concatenate(conf_list)
+        label_list = np.concatenate(label_list).astype(int)
 
         for k in extras:
-            extras[k] = torch.cat(extras[k]).numpy()
+            if isinstance(extras[k][0], list):
+                extras[k] = [np.concatenate([ex[i] for ex in extras[k]]) for i in range(len(extras[k][0]))]
+            else:
+                extras[k] = np.concatenate(extras[k])
 
         if len(extras) == 0:
             extras = None

@@ -7,5 +7,5 @@ python3 ${HDIR}/main.py --config ${HDIR}/configs/datasets/cifar10/cifar10_ood.ym
   ${HDIR}/configs/datasets/cifar10/cifar10.yml \
   ${HDIR}/configs/preprocessors/base_preprocessor.yml \
   --network.pretrained True \
-  --network.checkpoint /fs01/home/nng/projects/OpenOOD/results/cifar10_resnet18_32x32_base_e100_lr0.1_default/s0/best_no_bn.ckpt \
-  --network.use_bn False ${@:1}
+  --network.checkpoint /fs01/home/nng/slurm/2023-11-07/run_bash/bn,cifar10,no_residual,train/results/cifar10_resnet18_32x32_base_e200_lr0.1_default/s0/best_epoch130_acc0.9500.ckpt \
+  --network.residual False  ${@:1}
