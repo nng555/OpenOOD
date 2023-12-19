@@ -67,6 +67,10 @@ class EKFAC(Optimizer):
         self._bwd_handles = []
         for mod in net.modules():
             mod_class = mod.__class__.__name__
+
+            if issubclass(mod.__class__, nn.Conv2d):
+                mod_class = 'Conv2d'
+
             #if mod_class in ['Linear', 'Conv2d', 'BatchNorm2d']:
             if mod_class in ['Linear', 'Conv2d']:
                 params = [mod.weight]
@@ -86,24 +90,18 @@ class EKFAC(Optimizer):
 
         super(EKFAC, self).__init__(self.params, {})
 
-        for mod in net.modules():
-            mod_class = mod.__class__.__name__
-            if mod_class == 'Conv2d':
-                # Adding gathering filter for hessian
-                self.state[mod]['gathering_filter_hy'] = self._get_gathering_filter(mod, channels=mod.out_channels)
-
     def get_thresh_and_idx(self, eigens, nfeatures):
-        eigens += self.eps
-        threshes = torch.logspace(torch.log(eigens.min()), torch.log(eigens.max()), nfeatures, math.e)
-        scatter_idx = torch.zeros_like(eigens).long()
+        deigens = eigens + self.eps
+        threshes = torch.logspace(torch.log(deigens.min()), torch.log(deigens.max()), nfeatures, math.e)
+        scatter_idx = torch.zeros_like(deigens).long()
         pcum = len(scatter_idx)
-        scatter_idx = torch.zeros_like(eigens).long()
+        scatter_idx = torch.zeros_like(deigens).long()
         for t in threshes:
-            tcum = (eigens > t).sum()
+            tcum = (deigens > t).sum()
             if tcum == pcum:
                 continue
             pcum = tcum
-            scatter_idx[eigens > t] += 1
+            scatter_idx[deigens > t] += 1
 
         return threshes, scatter_idx
 
@@ -138,6 +136,8 @@ class EKFAC(Optimizer):
         self.clear_hooks()
         for name, mod in net.named_modules():
             mod_class = mod.__class__.__name__
+            if issubclass(mod.__class__, nn.Conv2d):
+                mod_class = 'Conv2d'
             if mod_class in ['Linear', 'Conv2d']:
                 #handle = mod.register_forward_pre_hook(self._save_input)
                 #self._fwd_handles.append(handle)
@@ -155,13 +155,13 @@ class EKFAC(Optimizer):
     def _track_transfer(self, mod, grad_input, grad_output):
         self.transfer.append(mod)
 
-    def step(self, update_stats=True, update_params=True, grads=None, inverse=True, l2=False, return_feats=False, labels=None, layers=False, sandwich=False):
+    def step(self, update_stats=True, update_params=True, grads=None, inverse=True, return_feats=False, return_grads=False, labels=None, layers=False, sandwich=False):
         """Performs one step of preconditioning."""
         assert not (labels is None and self.center), "Require labels for per class centering"
         nat_grads = {}
 
         eigenfeat = []
-        layerfeat = []
+        #layerfeat = []
         if layers:
             l2_norm = []
             m1_norm = []
@@ -197,58 +197,66 @@ class EKFAC(Optimizer):
 
             # only one of grads or g_kfe should be set
             out = precond_fn(weight, bias, group, state, scale,
-                    g=wgrad, gb=bgrad, inverse=inverse, l2=l2, labels=labels, sandwich=sandwich)
+                    g=wgrad, gb=bgrad, inverse=inverse, labels=labels, sandwich=sandwich)
 
             if group['layer_type'] != 'BatchNorm2d':
                 scale *= self.layerscale
 
-            if l2:
-                _l2_norm, _l1_norm, _m1_norm, g_kfe, nat_bgrad, nat_wgrad = out
-                if layers:
-                    l2_norm.append(_l2_norm)
-                    m1_norm.append(_m1_norm)
-                    l1_norm.append(_l1_norm)
-                else:
-                    l2_norm += _l2_norm
-                    l1_norm += _l1_norm
-                    m1_norm += _m1_norm
-                if return_feats:
-                    _, nfeatures, scatter_idx = self.layer_order[weight]
-                    _layerfeat = torch.scatter_add(torch.zeros(nfeatures).cuda(), 0, scatter_idx, g_kfe.flatten())
-                    eigenfeat.append(g_kfe.flatten())
-                    layerfeat.append(_layerfeat)
+            _l2_norm, _l1_norm, nat_bgrad, nat_wgrad = out
+            if layers:
+                l2_norm.append(_l2_norm)
+                #m1_norm.append(_m1_norm)
+                l1_norm.append(_l1_norm)
             else:
-                nat_bgrad, nat_wgrad = out
-
-            if nat_wgrad is not None:
-                nat_grads[wname] = nat_wgrad
-                if nat_bgrad is not None:
-                    nat_grads[bname] = nat_bgrad
-        if l2:
+                l2_norm += _l2_norm
+                l1_norm += _l1_norm
+                #m1_norm += _m1_norm
             if return_feats:
-                eigenfeat = torch.cat(eigenfeat)
-                out = torch.zeros(self.nfeature_reduce + 1).cuda()
-                eigenfeat = torch.scatter_add(out, 0, self.scatter_idx, eigenfeat)
-                return nat_grads, l2_norm, l1_norm, m1_norm, eigenfeat, layerfeat
-            else:
-                return nat_grads, l2_norm, l1_norm, m1_norm
-        else:
-            return nat_grads
+                #_, nfeatures, scatter_idx = self.layer_order[weight]
+                #_layerfeat = torch.scatter_add(torch.zeros(nfeatures).cuda(), 0, scatter_idx, g_kfe.flatten())
+                eigenfeat.append(g_kfe.flatten())
+                #layerfeat.append(_layerfeat)
+
+            if return_grads:
+                if nat_wgrad is not None:
+                    nat_grads[wname] = nat_wgrad
+                    if nat_bgrad is not None:
+                        nat_grads[bname] = nat_bgrad
+
+        #res = [l2_norm, l1_norm, m1_norm]
+        res = [l2_norm, l1_norm]
+
+        if return_feats:
+            eigenfeat = torch.cat(eigenfeat)
+            out = torch.zeros(self.nfeature_reduce + 1).cuda()
+            eigenfeat = torch.scatter_add(out, 0, self.scatter_idx, eigenfeat)
+            res.append(eigenfeat)
+        if return_grads:
+            res.append(nat_grads)
+
+        return res
 
     def dict_dot(self, ldict, rdict, params=None, return_layers=False):
         res = []
+        sres = 0
         if params is None:
             for i, p in enumerate(rdict.keys()):
-                res.append(torch.dot(rdict[p].reshape(-1), ldict[p].reshape(-1)) / self.numel)
+                if return_layers:
+                    res.append(torch.dot(rdict[p].reshape(-1), ldict[p].reshape(-1)) / self.numel)
+                else:
+                    sres += torch.dot(rdict[p].reshape(-1), ldict[p].reshape(-1)) / self.numel
         else:
             for i, (k, v) in enumerate(params):
                 if v in rdict:
-                    res.append(torch.dot(ldict[k].reshape(-1), rdict[v].reshape(-1)) / self.numel)
+                    if return_layers:
+                        res.append(torch.dot(ldict[k].reshape(-1), rdict[v].reshape(-1)) / self.numel)
+                    else:
+                        sres += torch.dot(ldict[k].reshape(-1), rdict[v].reshape(-1)) / self.numel
 
         if return_layers:
             return res
         else:
-            return torch.sum(torch.tensor(res))
+            return sres
 
     def dict_bdot(self, ldict, rdict):
         res = None
@@ -400,14 +408,14 @@ class EKFAC(Optimizer):
         return m2, eps
 
     def _precond_ra(self, weight, bias, group, state, scale,
-            g=None, gb=None, inverse=True, l2=False, labels=None, sandwich=False):
+            g=None, gb=None, inverse=True, labels=None, sandwich=False):
         """Applies preconditioning."""
         res = []
         kfe_x = state['kfe_x']
         kfe_gy = state['kfe_gy']
         #kfe_hy = state['kfe_hy']
         m2 = state['m2']
-        m1 = state['m1']
+        #m1 = state['m1']
         if g is None:
             g = weight.grad.data.unsqueeze(0)
         s = g.shape
@@ -442,18 +450,16 @@ class EKFAC(Optimizer):
 
         # layerwise multiplicative damping
         if inverse:
-            if l2:
-                res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() )
-                res.append((g_kfe**2 * self.eigenscale / torch.sqrt(m2 + eps)).sum())
-                res.append((g_kfe * m1 * self.eigenscale / (m2 + eps)).sum())
-                res.append(g_kfe**2 * self.eigenscale / (m2 + eps) )
+            res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() )
+            res.append((torch.abs(g_kfe) * self.eigenscale / torch.sqrt(m2 + eps)).sum())
+            #res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum())
+            #res.append(g_kfe**2 * self.eigenscale / (m2 + eps))
             g_nat_kfe = g_kfe * self.eigenscale / (m2 + eps)
         else:
-            if l2:
-                res.append((g_kfe**2 * self.eigenscale * (m2 + eps)).sum() )
-                res.append(torch.sum(g_kfe**2 * self.eigenscale * torch.sqrt(m2 + eps)))
-                res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
-                res.append(g_kfe**2 * self.eigenscale * (m2 + eps) )
+            res.append((g_kfe**2 * self.eigenscale * (m2 + eps)).sum() )
+            res.append((torch.abs(g_kfe) * self.eigenscale * torch.sqrt(m2 + eps)).sum())
+            #res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
+            #res.append(g_kfe**2 * self.eigenscale * (m2 + eps) )
             g_nat_kfe = g_kfe * self.eigenscale * (m2 + eps)
 
         g_nat = torch.matmul(torch.matmul(kfe_gy, g_nat_kfe), kfe_x.t())
@@ -483,14 +489,14 @@ class EKFAC(Optimizer):
         return res
 
     def _precond_sua_sud_ra(self, weight, bias, group, state, scale,
-            g=None, gb=None, inverse=True, l2=False, labels=None, sandwich=False):
+            g=None, gb=None, inverse=True, labels=None, sandwich=False):
         """Preconditioning for KFAC SUA."""
         res = []
         kfe_x = state['kfe_x']
         kfe_gy = state['kfe_gy']
         #kfe_hy = state['kfe_hy']
         m2 = state['m2']
-        m1 = state['m1']
+        #m1 = state['m1']
         if g is None:
             g = weight.grad.data.unsqueeze(0)
         s = g.shape
@@ -515,18 +521,16 @@ class EKFAC(Optimizer):
         m2 *= scale
 
         if inverse:
-            if l2:
-                res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() )
-                res.append(torch.sum(g_kfe * self.eigenscale / torch.sqrt(m2 + eps)))
-                res.append((g_kfe * m1 * self.eigenscale / (m2 + eps)).sum() )
-                res.append(g_kfe**2 * self.eigenscale / (m2 + eps) )
+            res.append((g_kfe**2 * self.eigenscale / (m2 + eps)).sum() )
+            res.append((torch.abs(g_kfe) * self.eigenscale / torch.sqrt(m2 + eps)).sum())
+            #res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
+            #res.append(g_kfe**2 * self.eigenscale / (m2 + eps) )
             g_nat_kfe = g_kfe * self.eigenscale / (m2 + eps)
         else:
-            if l2:
-                res.append((g_kfe**2 * self.eigenscale * (m2 + eps)).sum() )
-                res.append(torch.sum(g_kfe * self.eigenscale * torch.sqrt(m2 + eps)))
-                res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
-                res.append(g_kfe**2 * self.eigenscale * (m2 + eps) )
+            res.append((g_kfe**2 * self.eigenscale * (m2 + eps)).sum() )
+            res.append((torch.abs(g_kfe) * self.eigenscale * torch.sqrt(m2 + eps)).sum())
+            #res.append((g_kfe * m1 * self.eigenscale * (m2 + eps)).sum() )
+            #res.append(g_kfe**2 * self.eigenscale * (m2 + eps) )
             g_nat_kfe = g_kfe * self.eigenscale * (m2 + eps)
 
         g_nat = self._to_kfe_sua(g_nat_kfe, kfe_x.t(), kfe_gy.t())
@@ -650,18 +654,6 @@ class EKFAC(Optimizer):
                     else:
                         raise NotImplementedError
 
-            elif op == 'average_means':
-                assert 'weight' in kwargs, "Must provied weight"
-                weight = kwargs['weight']
-                if group['layer_type'] == 'Conv2d':
-                    state['ex'] /= weight
-                    state['ex2'] /= weight
-                    state['xvar'] = state['ex2'] - state['ex']**2
-                    state['egy'] /= weight
-                    state['egy2'] /= weight
-                    state['gyvar'] = state['egy2'] - state['egy']**2
-                    res.append([state['ex'], state['xvar']])
-
             elif op == 'state':
                 ex_weight = kwargs.get('ex_weight', None)
                 labels = kwargs.get('labels', None)
@@ -727,9 +719,6 @@ class EKFAC(Optimizer):
     def update_mean(self, ex_weight=None, labels=None):
         assert not (self.center and labels is None), "Need labels to calculate per class averages"
         return self.update_cache('mean', ex_weight=ex_weight, labels=labels)
-
-    def average_means(self, weight):
-        return self.update_cache('average_means', weight=weight)
 
     # 1. accumulate average activation/output gradient covariance across batches
     def update_state(self, ex_weight=None, labels=None):
@@ -994,10 +983,8 @@ class EKFAC(Optimizer):
 
         if isconv and self.sua and self.sud:
             g_kfe = self._to_kfe_sua(g, kfe_x, kfe_gy)
-            #h_kfe = self._to_kfe_sua(g, kfe_x, kfe_hy)
         else:
             g_kfe = torch.matmul(torch.matmul(kfe_gy.t(), g), kfe_x)
-            #h_kfe = torch.matmul(torch.matmul(kfe_hy.t(), g), kfe_x)
 
         if ex_weight is None:
             ex_weight = torch.ones(g_kfe.shape[0]).cuda()
@@ -1010,18 +997,11 @@ class EKFAC(Optimizer):
                 state['m2'] += (g_kfe.detach()**2 * ex_weight).sum(0)
         elif moment == 1:
             if 'm1' not in state:
-                state['m1'] = (g_kfe * ex_weight).sum(0)
+                state['m1'] = (g_kfe.detach() * ex_weight).sum(0)
             else:
-                state['m1'] += (g_kfe * ex_weight).sum(0)
+                state['m1'] += (g_kfe.detach() * ex_weight).sum(0)
         else:
             raise NotImplementedError
-
-        """
-        if 'hm2' not in state:
-            state['hm2'] = (h_kfe.detach()**2 * ex_weight).sum(0)
-        else:
-            state['hm2'] += (h_kfe.detach()**2 * ex_weight).sum(0)
-        """
 
 
     def _compute_block_basis(self, group, state, skip_m2=True):

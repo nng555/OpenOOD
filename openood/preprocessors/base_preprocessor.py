@@ -12,7 +12,7 @@ class BasePreprocessor():
         self.image_size = config.dataset.image_size
         self.interpolation = interpolation_modes[config.dataset.interpolation]
         normalization_type = config.dataset.normalization_type
-        if normalization_type in normalization_dict.keys():
+        if normalization_type in normalization_dict.keys() and config.network.name != 'bit':
             self.mean = normalization_dict[normalization_type][0]
             self.std = normalization_dict[normalization_type][1]
         else:

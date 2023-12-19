@@ -46,11 +46,13 @@ class OODEvaluator(BaseEvaluator):
             self.hyperparam_search(net, id_data_loaders['val'],
                                    ood_data_loaders['val'], postprocessor)
 
+        """
         print(f'Performing inference on ood val dataset...', flush=True)
         vid_pred, vid_conf, vid_gt, vid_extra = postprocessor.inference(
             net, ood_data_loaders['val'])
         if self.config.recorder.save_scores:
             self._save_scores(vid_pred, vid_conf, vid_gt, vid_extra, 'ood_val')
+        """
 
         print(f'Performing inference on {dataset_name} test dataset...', flush=True)
         id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
@@ -74,14 +76,14 @@ class OODEvaluator(BaseEvaluator):
 
         # load nearood data and compute ood metrics
         print(u'\u2500' * 70, flush=True)
-        self._eval_ood(net, [id_pred, id_conf, id_gt],
+        self._eval_ood(net, [id_pred, id_conf, id_gt, id_extra],
                        ood_data_loaders,
                        postprocessor,
                        ood_split='nearood')
 
         # load farood data and compute ood metrics
         print(u'\u2500' * 70, flush=True)
-        self._eval_ood(net, [id_pred, id_conf, id_gt],
+        self._eval_ood(net, [id_pred, id_conf, id_gt, id_extra],
                        ood_data_loaders,
                        postprocessor,
                        ood_split='farood')
@@ -94,7 +96,7 @@ class OODEvaluator(BaseEvaluator):
                   postprocessor: BasePostprocessor,
                   ood_split: str = 'nearood'):
         print(f'Processing {ood_split}...', flush=True)
-        [id_pred, id_conf, id_gt] = id_list
+        [id_pred, id_conf, id_gt, id_extra] = id_list
         metrics_list = []
         for dataset_name, ood_dl in ood_data_loaders[ood_split].items():
             print(f'Performing inference on {dataset_name} dataset...',

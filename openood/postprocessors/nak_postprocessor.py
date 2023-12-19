@@ -1,4 +1,5 @@
 from typing import Any
+import numpy as np
 import gc
 import os
 
@@ -81,7 +82,6 @@ class NAKPostprocessor(BasePostprocessor):
         self.eigenscale = self.args.eigenscale
         self.layerscale = self.args.layerscale
         self.total_eps = self.args.total_eps
-        self.center = self.args.center
         self.state_path = self.args.state_path + '.cpt'
         self.grad_path = self.args.state_path + '_grad.cpt'
         self.spec_path = self.args.state_path + '_spec.cpt'
@@ -91,6 +91,7 @@ class NAKPostprocessor(BasePostprocessor):
         self.empirical = self.args.empirical
         self.moments_chunk_size = self.args.moments_chunk_size
         self.class_chunk_size = self.args.class_chunk_size
+        self.reset_m1 = self.args.reset_m1
 
         self.full_fim = self.args.full_fim
 
@@ -162,7 +163,7 @@ class NAKPostprocessor(BasePostprocessor):
                 net.zero_grad()
                 self.optimizer.zero_grad()
                 labels = torch.ones(len(logits)).cuda().long() * kcls
-                loss = self.floss_temp * F.cross_entropy(logits / self.floss_temp, labels, reduction='sum') / self.ntrain
+                loss = F.cross_entropy(logits / self.floss_temp, labels, reduction='sum') / self.ntrain
                 loss.backward(retain_graph=(kcls != self.num_classes - 1))
                 grads = {k: v.grad.data for k, v in net.named_parameters()}
                 if avg_grads[kcls] is None:
@@ -229,8 +230,22 @@ class NAKPostprocessor(BasePostprocessor):
                 else:
                     int_hess += _int_hess.sum(0)
                 """
+                if self.floss_fn == 'ce':
+                    loss = F.cross_entropy(logits / self.eigen_temp, labels, reduction='sum')
+                elif self.floss_fn == 'nlogits':
+                    probs = F.softmax(logits / self.eigen_temp, -1)
+                    one_hot_labels = F.one_hot(labels, self.num_classes)
+                    cprobs = (probs * one_hot_labels).sum(-1)
+                    loss = torch.log(cprobs / (1 - cprobs)).sum()
+                elif self.floss_fn == 'back_ce':
+                    new_logits = torch.cat((logits, torch.zeros((len(logits), 1)).cuda()), -1)
+                    new_probs = F.softmax(new_logits / self.eigen_temp, -1).detach()
+                    new_labels = torch.multinomial(new_probs, 1).squeeze()
+                    loss = self.eigen_temp * F.cross_entropy(new_logits / self.eigen_temp, labels, reduction='sum')
+                elif self.floss_fn == 'logit_margin':
+                    labels = F.one_hot(torch.randint(0, self.num_classes, (len(logits),)), self.num_classes).cuda()
+                    loss = (logits - (logits * labels).sum(-1).unsqueeze(-1)).mean(-1).sum()
 
-                loss = self.eigen_temp * F.cross_entropy(logits / self.eigen_temp, labels, reduction='sum')
                 loss.backward()
                 self.optimizer.update_state(labels=labels)
                 if self.per_class_m1:
@@ -246,10 +261,9 @@ class NAKPostprocessor(BasePostprocessor):
                     net.zero_grad()
                     self.optimizer.zero_grad()
                     labels = torch.ones(len(logits)).cuda().long() * kcls
-                    loss = self.eigen_temp * F.cross_entropy(logits / self.eigen_temp, labels, reduction='sum')
+                    loss = F.cross_entropy(logits / self.eigen_temp, labels, reduction='sum')
                     loss.backward(retain_graph=(kcls != self.num_classes - 1))
 
-                    # centering happens inside second moment estimator
                     # weight by probabilities
                     self.optimizer.update_state(ex_weight=probs[:, kcls], labels=labels)
                     if self.per_class_m1:
@@ -260,32 +274,59 @@ class NAKPostprocessor(BasePostprocessor):
 
         self.optimizer.average_state(total_weight)
 
-    def setup_eigen_moments(self, net, train_loader, val_loader, moment=2):
+    def setup_eigen_moments(self, net, train_loader, val_loader):
         params = {k: v.detach() for k, v in net.named_parameters()}
         buffers = {k: v.detach() for k, v in net.named_buffers()}
 
         def moments_single_ce(idv_ex, target):
             label = F.one_hot(target, self.num_classes)
-            grads = grad(lambda p, b, d: (-self.moments_temp * F.log_softmax(functional_call(net, (p, b), (d,)) / self.moments_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
+            grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.moments_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
             return grads
 
-        def moments_single_logits(idv_ex, target):
-            # use a multiplicative mask inside vmap
+        def moments_single_nlogits(idv_ex, target):
             label = F.one_hot(target, self.num_classes)
-            def logits_loss(params, buffers, data):
-                out = functional_call(net, (params, buffers), (data,)) / self.moments_temp
-                loss = 0.5 * (out**2 * label).sum() + (out * label).sum() * out.sum()
+            def nlogit(p, b, d):
+                out = (F.softmax(functional_call(net, (p, b), (d,)) / self.moments_temp, -1) * label).sum()
+                loss = torch.log(out / (1 - out))
                 return loss
-            grads = grad(lambda p, b, d: logits_loss(p, b, d))(params, buffers, idv_ex.unsqueeze(0))
+            grads = grad(nlogit)(params, buffers, idv_ex.unsqueeze(0))
+            return grads
+
+        def moments_single_back_ce(idv_ex, target):
+            label = F.one_hot(target, self.num_classes + 1)
+
+            def back_ce(p, b, d):
+                out = functional_call(net, (p, b), (d,))
+                out = torch.cat((out, torch.zeros(len(out), 1).cuda()), -1)
+                loss = (-self.moments_temp * F.log_softmax(out, -1) * label).sum()
+                return loss
+
+            grads = grad(back_ce)(params, buffers, idv_ex.unsqueeze(0))
+            return grads
+
+        def moments_single_logit_margin(idv_ex, target):
+            label = F.one_hot(target, self.num_classes)
+
+            def logit_margin(p, b, d):
+                logits = functional_call(net, (p, b), (d,))
+                loss = logits - (logits * label).sum(-1).unsqueeze(-1)
+                loss = loss.mean(-1).sum()
+                return loss
+
+            grads = grad(logit_margin)(params, buffers, idv_ex.unsqueeze(0))
             return grads
 
         if self.floss_fn == 'ce':
-            moment_fn = moments_single_ce
-        elif self.floss_fn == 'logits':
-            moment_fn = moments_single_logits
+            moments_fn = moments_single_ce
+        elif self.floss_fn == 'nlogits':
+            moments_fn = moments_single_nlogits
+        elif self.floss_fn == 'back_ce':
+            moments_fn = moments_single_back_ce
+        elif self.floss_fn == 'logit_margin':
+            moments_fn = moments_single_logit_margin
 
         vmap_moments = vmap(
-            moment_fn,
+            moments_fn,
             in_dims=(0, 0),
             randomness='different',
             chunk_size=self.moments_chunk_size,
@@ -293,7 +334,7 @@ class NAKPostprocessor(BasePostprocessor):
 
         # fit second moments in eigenbasis
         total_weight = 0
-        for i, batch in enumerate(tqdm(loader,
+        for i, batch in enumerate(tqdm(train_loader,
                                        desc="Eigen 2nd Moments: ",
                                        position=0,
                                        leave=True,
@@ -314,7 +355,15 @@ class NAKPostprocessor(BasePostprocessor):
             raw_probs = F.softmax(logits, -1).detach()
 
             if self.topk == -1:
-                labels = torch.multinomial(probs, 1).squeeze()
+                if self.floss_fn == 'back_ce':
+                    new_logits = torch.cat((logits, torch.zeros((len(logits), 1)).cuda()), -1)
+                    new_probs = F.softmax(new_logits / self.eigen_temp, -1).detach()
+                    labels = torch.multinomial(new_probs, 1).squeeze()
+                elif self.floss_fn == 'logit_margin':
+                    labels = torch.randint(0, self.num_classes, (len(logits),)).cuda()
+                else:
+                    labels = torch.multinomial(probs, 1).squeeze()
+
                 grads = vmap_moments(data, labels)
                 grads = {v: grads[k] for k, v in net.named_parameters()}
                 self.optimizer.update_second_moments(grads=grads, labels=labels)
@@ -326,11 +375,7 @@ class NAKPostprocessor(BasePostprocessor):
                 for kcls in range(self.num_classes):
                     labels = torch.ones(len(data)).cuda().long() * kcls
                     grads = vmap_moments(data, labels)
-                    # center gradients before projection
-                    if self.center:
-                        grads = {v: grads[k] - self.avg_grad[k][kcls] for k, v in net.named_parameters()}
-                    else:
-                        grads = {v: grads[k] for k, v in net.named_parameters()}
+                    grads = {v: grads[k] for k, v in net.named_parameters()}
 
                     self.optimizer.update_second_moments(grads=grads, ex_weight=probs[:, kcls], labels=labels)
                     del grads
@@ -342,108 +387,42 @@ class NAKPostprocessor(BasePostprocessor):
 
         self.optimizer.average_second_moments(total_weight)
 
+        #self.setup_first_eigen_moments(net, val_loader)
+
+    def setup_first_eigen_moments(self, net, loader):
+        params = {k: v.detach() for k, v in net.named_parameters()}
+        buffers = {k: v.detach() for k, v in net.named_buffers()}
+
+        def moments_single_ce(idv_ex, target):
+            label = F.one_hot(target, self.num_classes)
+            grads = grad(lambda p, b, d: (-self.moments_temp * F.log_softmax(functional_call(net, (p, b), (d,)) / self.moments_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
+            return grads
+
+        vmap_moments = vmap(
+            moments_single_ce,
+            in_dims=(0, 0),
+            randomness='different',
+            chunk_size=self.moments_chunk_size,
+        )
+
         total_weight = 0
-        for i, batch in enumerate(tqdm(val_loader,
+        for i, batch in enumerate(tqdm(loader,
                                        desc="Eigen 1st Moments: ",
                                        position=0,
                                        leave=True,
-                                       total=self.moments_iter)):
-            if i == self.moments_iter:
-                break
+                                       total=len(loader))):
 
             data = batch['data'].cuda()
             if self.double:
                 data = data.double()
-            logits = net(data)
-
-            if self.moments_temp == -1:
-                probs = F.softmax(torch.ones_like(logits), -1)
-            else:
-                probs = F.softmax(logits / self.moments_temp, -1).detach()
-
-            raw_probs = F.softmax(logits, -1).detach()
-
-            if self.topk == -1:
-                labels = torch.multinomial(probs, 1).squeeze()
-                grads = vmap_moments(data, labels)
-                grads = {v: grads[k] for k, v in net.named_parameters()}
-                self.optimizer.update_first_moments(grads=grads, labels=labels)
-                del grads
-                if self.per_class_m1:
-                    for kcls in range(self.num_classes):
-                        total_weight[kcls] += (labels == kcls).sum()
-            else:
-                for kcls in range(self.num_classes):
-                    labels = torch.ones(len(data)).cuda().long() * kcls
-                    grads = vmap_moments(data, labels)
-                    # center gradients before projection
-                    if self.center:
-                        grads = {v: grads[k] - self.avg_grad[k][kcls] for k, v in net.named_parameters()}
-                    else:
-                        grads = {v: grads[k] for k, v in net.named_parameters()}
-
-                    self.optimizer.update_first_moments(grads=grads, ex_weight=probs[:, kcls], labels=labels)
-                    del grads
-                    if self.per_class_m1:
-                        total_weight[kcls] += probs[:, kcls].sum()
-
-            if not self.per_class_m1:
-                total_weight += len(data)
+            labels = batch['label'].cuda()
+            grads = vmap_moments(data, labels)
+            grads = {v: grads[k] for k, v in net.named_parameters()}
+            self.optimizer.update_first_moments(grads=grads, labels=labels)
+            total_weight += len(data)
+            del grads
 
         self.optimizer.average_first_moments(total_weight)
-
-    def setup_weights(self, net, val_id_loader, val_ood_loader):
-
-        params = {k: v.detach() for k, v in net.named_parameters()}
-        buffers = {k: v.detach() for k, v in net.named_buffers()}
-
-        def grad_single_loss(idv_ex, target):
-            label = F.one_hot(target, self.num_classes)
-
-            # calculate and center gradients
-            grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.grad_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
-            grads = {v: grads[k].unsqueeze(0) for k, v in net.named_parameters()}
-
-            _, _, _, _, efeat, _ = self.optimizer.step(grads=grads, inverse=self.inverse, l2=True, labels=target, return_feats=True, sandwich=self.sandwich, layers=True)
-            return efeat
-
-        def process_single_grad(idv_ex):
-            res = vmap(grad_single_loss, in_dims=(None, 0), chunk_size=self.class_chunk_size)(idv_ex, torch.arange(self.num_classes).cuda())
-            return res
-
-        vmap_grad = vmap(process_single_grad, in_dims=(0,), chunk_size=self.jac_chunk_size, randomness='different')
-
-
-        def process_loader(loader, name):
-            feats = []
-            for i, batch in enumerate(tqdm(loader,
-                                           desc=name + " Eigenfeatures: ",
-                                           position=0,
-                                           leave=True,
-                                           total=len(loader))):
-
-                data = batch['data'].cuda()
-                logits = net(data)
-                probs = F.softmax(logits / self.grad_temp, -1)
-
-                eigenfeat = vmap_grad(data)
-                eigenfeat = torch.sum(eigenfeat * probs[..., None], 1)
-                feats.append(eigenfeat)
-
-            feats = torch.cat(feats)
-            return feats
-
-        id_feats = process_loader(val_id_loader, "ID").detach().cpu().numpy()
-        ood_feats = process_loader(val_ood_loader, "OOD").detach().cpu().numpy()
-        X = np.concatenate((id_feats, ood_feats))
-        Y = np.concatenate((np.zeros(len(id_feats)), np.ones(len(ood_feats))))
-
-        #scaler = RobustScaler().fit(X)
-        #X = scaler.transform(X)
-        model = LogisticRegression(C=1, maxiter=10000)
-        model.fit(X, Y)
-
-        return model
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
 
@@ -454,83 +433,33 @@ class NAKPostprocessor(BasePostprocessor):
             net.fuse_conv_bn_layers()
 
         net.eval()
-        print(net)
 
         # Use EKFAC
-        if not self.full_fim:
-            self.optimizer = EKFAC(
-                net,
-                eps=self.damping,
-                num_classes=self.num_classes,
-                sua=self.sua,
-                sud=self.sud,
-                layer_eps=self.layer_eps,
-                eps_type=self.eps_type,
-                eigenscale=self.eigenscale,
-                featskip=self.featskip,
-                layerscale=self.layerscale,
-                center=self.center,
-                per_class_m1=self.per_class_m1,
-                nfeature_reduce=self.nfeature_reduce,
-            )
+        self.optimizer = EKFAC(
+            net,
+            eps=self.damping,
+            num_classes=self.num_classes,
+            sua=self.sua,
+            sud=self.sud,
+            layer_eps=self.layer_eps,
+            eps_type=self.eps_type,
+            eigenscale=self.eigenscale,
+            featskip=self.featskip,
+            layerscale=self.layerscale,
+            per_class_m1=self.per_class_m1,
+            nfeature_reduce=self.nfeature_reduce,
+        )
 
-            # maybe need to modify this depending on whether we use the full dataset
-            self.ntrain = len(id_loader_dict['train'].sampler)
+        # maybe need to modify this depending on whether we use the full dataset
+        self.ntrain = len(id_loader_dict['train'].sampler)
 
-            if self.eigen_iter == -1:
-                self.eigen_iter = len(id_loader_dict['train'])
+        if self.eigen_iter == -1:
+            self.eigen_iter = len(id_loader_dict['train'])
 
-            if self.moments_iter == -1:
-                self.moments_iter = len(id_loader_dict['train'])
-
-        # use NNGeometry Full Implicit FIM
-        else:
-            from nngeometry.metrics import FIM_MonteCarlo
-            from nngeometry.object import PMatImplicit
-            from nngeometry.layercollection import LayerCollection
-            from nngeometry.object.vector import random_pvector
-
-            self.fim = FIM_MonteCarlo(model=net,
-                                      loader=id_loader_dict['train'],
-                                      representation=PMatImplicit,
-                                      device='cuda')
-
-            layer_collection = LayerCollection.from_model(net)
-            v = random_pvector(LayerCollection.from_model(net), device='cuda')
-            import time
-            start = time.time()
-            out = self.fim.mv(v)
-            end = time.time()
-            print(end - start)
-
-            import ipdb; ipdb.set_trace()
-
+        if self.moments_iter == -1:
+            self.moments_iter = len(id_loader_dict['train'])
 
         if not self.setup_flag:
-            # setup average grad for centering
-            if self.center:
-                if os.path.exists(self.grad_path):
-                    print(f"Loading grad state from {self.grad_path}")
-                    self.avg_grad = torch.load(self.grad_path)
-                else:
-                    self.avg_grad = self.setup_avg_grad(net, id_loader_dict['train'])
-                    self.avg_grad = {k: torch.stack([g[k] for g in self.avg_grad]) for k in self.avg_grad[0]}
-                    torch.save(self.avg_grad, self.grad_path)
-
-                avg_grad_norm = self.optimizer.dict_bdot(self.avg_grad, self.avg_grad).diagonal()
-                print(f"Average grad l2 norm: {avg_grad_norm}")
-
-            # accumulate means for centering
-            if self.whiten:
-                self.optimizer.init_hooks(net)
-                res = self.setup_means(net, id_loader_dict['train'])
-                net._whiten(res)
-
-                # rebuild optimizer
-                self.optimizer.clear_hooks()
-                self.optimizer.clear_cache()
-                self.optimizer.zero_grad()
-                self.optimizer.rebuild(net)
 
             if self.state_path != "None.cpt" and os.path.exists(self.state_path):
                 print(f"Loading EKFAC state from {self.state_path}")
@@ -555,7 +484,7 @@ class NAKPostprocessor(BasePostprocessor):
                     net.zero_grad()
 
                     # reaccumulate eigenbasis second moments
-                    self.setup_eigen_moments(net, id_loader_dict['train'])
+                    self.setup_eigen_moments(net, id_loader_dict['train'], id_loader_dict['train'])
 
                     # clean up again
                     gc.collect()
@@ -567,20 +496,11 @@ class NAKPostprocessor(BasePostprocessor):
             if not os.path.exists(self.spec_path):
                 torch.save(self.optimizer.get_spectrum(), self.spec_path)
 
+            if self.reset_m1:
+                self.setup_first_eigen_moments(net, id_loader_dict['val'])
+
             self.optimizer.print_eigens()
             self.optimizer.get_spectrum()
-
-            # remove top C^2 eigenvalues
-            if self.remove_top:
-                self.optimizer.remove_top_moments(self.num_classes**2)
-
-            """
-            if os.path.exists(self.lr_model_path):
-                self.lr_model = pkl.load(open(self.lr_model_path, 'rb'))
-            else:
-                self.lr_model = self.setup_weights(net, id_loader_dict['val'], ood_loader_dict['val'])
-                pkl.dump(self.lr_model, open(self.lr_model_path, 'wb'))
-            """
 
         else:
             pass
@@ -639,15 +559,11 @@ class NAKPostprocessor(BasePostprocessor):
             def grad_single_loss(idv_ex, target):
                 label = F.one_hot(target, self.num_classes)
 
-                # calculate and center gradients
-                grads = grad(lambda p, b, d: (-F.log_softmax(functional_call(net, (p, b), (d,)) / self.grad_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
+                grads = grad(lambda p, b, d: (-self.grad_temp * F.log_softmax(functional_call(net, (p, b), (d,)) / self.grad_temp, -1) * label).sum())(params, buffers, idv_ex.unsqueeze(0))
                 grads = {v: [grads[k].unsqueeze(0), k] for k, v in net.named_parameters()}
+                res = self.optimizer.step(grads=grads, inverse=self.inverse, labels=target, return_grads=with_nat, return_feats=False, sandwich=self.sandwich, layers=True)
 
-                nat_grads, l2_norm, l1_norm, m1_norm, efeat, lfeat = self.optimizer.step(grads=grads, inverse=self.inverse, l2=True, labels=target, return_feats=True, sandwich=self.sandwich, layers=True)
-                if with_nat:
-                    return {k: v[0] for k, v in nat_grads.items()}
-                else:
-                    return l2_norm, l1_norm, m1_norm, efeat, lfeat
+                return res
 
             return grad_single_loss
             #self_nak = self.optimizer.dict_dot(grads, nat_grads, return_layers=True)
@@ -662,9 +578,54 @@ class NAKPostprocessor(BasePostprocessor):
             new_logits = functional_call(net, (new_params, buffers), (idv_ex.unsqueeze(0)))
             return new_logits[0]
 
-        def process_single_grad(idv_ex, idv_logits):
-            res = vmap(grad_single_loss(), in_dims=(None, 0), chunk_size=self.class_chunk_size)(idv_ex, torch.arange(self.num_classes).cuda())
+        def grad_single_uniform(idv_ex):
+            grads = grad(lambda p, b, d: -F.log_softmax(functional_call(net, (p, b), (d,)) / self.grad_temp, -1).mean())(params, buffers, idv_ex.unsqueeze(0))
+            grads = {v: [grads[k].unsqueeze(0), k] for k, v in net.named_parameters()}
+            res = self.optimizer.step(grads=grads, inverse=self.inverse, return_grads=False, return_feats=False, sandwich=self.sandwich, layers=True)
             return res
+
+        def grad_single_back_ce(idv_ex, target):
+            label = F.one_hot(target, self.num_classes + 1)
+
+            def back_ce(p, b, d):
+                out = functional_call(net, (p, b), (d,)) / self.grad_temp
+                out = torch.cat((out, torch.zeros(len(out), 1).cuda()), -1)
+                loss = (F.log_softmax(out, -1) * label).sum()
+                return loss
+
+            grads = grad(back_ce)(params, buffers, idv_ex.unsqueeze(0))
+            grads = {v: [grads[k].unsqueeze(0), k] for k, v in net.named_parameters()}
+            res = self.optimizer.step(grads=grads, inverse=self.inverse, labels=target, return_grads=False, return_feats=False, sandwich=self.sandwich, layers=True)
+            return res
+
+
+        def grad_single_logit_margin(idv_ex, target):
+            label = F.one_hot(target, self.num_classes)
+
+            def logit_margin(p, b, d):
+                logits = functional_call(net, (p, b), (d,))
+                loss = logits - (logits * label).sum(-1).unsqueeze(-1)
+                loss = loss.mean(-1).sum()
+                return loss
+
+            grads = grad(logit_margin)(params, buffers, idv_ex.unsqueeze(0))
+            grads = {v: [grads[k].unsqueeze(0), k] for k, v in net.named_parameters()}
+            res = self.optimizer.step(grads=grads, inverse=self.inverse, labels=target, return_grads=False, return_feats=False, sandwich=self.sandwich, layers=True)
+            return res
+
+        if self.floss_fn == 'ce':
+            def process_single_grad(idv_ex, idv_logits):
+                res = vmap(grad_single_loss(), in_dims=(None, 0), chunk_size=self.class_chunk_size)(idv_ex, torch.arange(self.num_classes).cuda())
+                return res
+        elif self.floss_fn == 'back_ce':
+            def process_single_grad(idv_ex, idv_logits):
+                res = vmap(grad_single_back_ce, in_dims=(None, 0), chunk_size=self.class_chunk_size)(idv_ex, torch.arange(self.num_classes + 1).cuda())
+                return res
+        elif self.floss_fn == 'logit_margin':
+            def process_single_grad(idv_ex, idv_logits):
+                res = vmap(grad_single_logit_margin, in_dims=(None, 0), chunk_size=self.class_chunk_size)(idv_ex, torch.arange(self.num_classes).cuda())
+                return res
+
 
         #new_logits = []
         #for idv_ex, idv_logits in zip(data, logits):
@@ -672,39 +633,60 @@ class NAKPostprocessor(BasePostprocessor):
 
         vmap_grad = vmap(process_single_grad, in_dims=(0, 0,), chunk_size=self.jac_chunk_size, randomness='different')
 
-        l2_norm, l1_norm, m1_norm, efeats, lfeats = vmap_grad(data, logits) # N x K x L
+        #l2_norm, l1_norm, m1_norm, efeats, lfeats, nl_nak = vmap_grad(data, logits) # N x K x L
+        l2_norm, l1_norm  = vmap_grad(data, logits) # N x K x L
+        #l2r_norm, l1r_norm = vmap(grad_single_uniform, in_dims=(0,), chunk_size=self.jac_chunk_size)(data)
         l2_norm = torch.stack(l2_norm, dim=-1)
         l1_norm = torch.stack(l1_norm, dim=-1)
-        m1_norm = torch.stack(m1_norm, dim=-1)
+        #m1_norm = torch.stack(m1_norm, dim=-1)
+        #l2r_norm = torch.stack(l2r_norm, dim=-1).sum(-1)
 
-        probs = F.softmax(torch.stack(logits) / self.grad_temp, -1)
+        if self.floss_fn == 'back_ce':
+            probs = F.softmax(torch.cat((logits, torch.zeros(len(logits), 1).cuda()), -1) / self.grad_temp, -1)
+        else:
+            probs = F.softmax(logits / self.grad_temp, -1)
 
         if self.grad_temp == -1:
             conf = torch.mean(-norm.sum(-1), -1)
         else:
             slayer = self.remove_bot_layers
             tlayer = l2_norm.shape[-1] - self.remove_top_layers
-            conf = torch.sum(l2_norm[..., slayer:tlayer].sum(-1) * probs, -1)
 
-            l2_cum = torch.sum(l2_norm.sum(-1) * probs, -1)
-            l1_cum = torch.sum(l1_norm.max(-1)[0] * probs, -1)
-            efeats = torch.sum(efeats * probs[..., None], 1)
-            lfeats = [torch.sum(lf * probs[..., None], 1) for lf in lfeats]# B x L x D
-            m1_cum = torch.sum(m1_norm.sum(-1) * probs, -1)
+            #conf = ((m1_norm.sum(-1) ** 2 / l2_norm.sum(-1)) * probs).sum(-1)
 
+            #conf = -torch.sum(l2_norm[..., slayer:tlayer].sum(-1) * probs, -1) / self.optimizer.numel
+            #conf = -torch.sum(nl_nak * probs, -1)
+
+            if self.floss_fn == 'logit_margin':
+                l2_cum = l2_norm.sum(-1).mean(-1)
+            else:
+                l2_cum = torch.sum(l2_norm.sum(-1) * probs, -1)
+            #l1_cum = torch.sum(l1_norm.max(-1)[0] * probs, -1)
+            #efeats = torch.sum(efeats * probs[..., None], 1)
+            #lfeats = [torch.sum(lf * probs[..., None], 1) for lf in lfeats]# B x L x D
+            #m1_cum = torch.sum(m1_norm.sum(-1) * probs, -1)
+            #nl_nak = -torch.sum(nl_nak * probs, -1)
+
+            #rao = (m1_norm.sum(-1)**2 / l2_norm.sum(-1))
+
+            conf = -l2_cum
         #conf = -self.lr_model.decision_function(efeats.detach().cpu().numpy())
         #conf = torch.from_numpy(conf)
 
         rdict = {
             'l2_cum': l2_cum,
             'l2_norm': l2_norm,
-            'l1_cum': l1_cum,
-            'l1_norm': l1_norm,
+            #'l1_cum': l1_cum,
+            #'l1_norm': l1_norm,
             'logits': logits,
-            'eigenfeat': efeats,
-            'm1_cum': m1_cum,
-            'm1_norm': m1_norm,
+            #'eigenfeat': efeats,
+            #'m1_cum': m1_cum,
+            #'m1_norm': m1_norm,
+            #'nl_nak': nl_nak,
             #'layerfeat': lfeats,
+            #'l2r_norm': l2r_norm,
+            'probs': probs,
+            #'rao': rao,
         }
 
         for k in rdict:

@@ -9,10 +9,11 @@ postprocessor:
     moments_iter: -1
     state_path: None
     left_output: loss
-    jac_chunk_size: 1
+    jac_chunk_size: 8
     remove_top: False
+    reset_m1: False
     center: False
-    moments_chunk_size: -1
+    moments_chunk_size: 64
     odin: False
     noise: 0.0014
     odin_temp: 1000

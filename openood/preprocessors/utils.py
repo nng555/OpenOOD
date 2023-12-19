@@ -30,7 +30,7 @@ def get_preprocessor(config: Config, split):
         'cutpaste': CutPastePreprocessor,
     }
 
-    if split == 'train':
+    if split == 'train' and config.preprocessor.augment:
         return train_preprocessors[config.preprocessor.name](config)
     else:
         try:

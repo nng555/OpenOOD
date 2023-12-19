@@ -36,7 +36,7 @@ hydra:
     env_type: venv
     env_name: pkvb
     gres: gpu:1
-    exclude: gpu012,gpu166,gpu125,gpu052,gpu150,gpu001,gpu173
+    exclude: gpu012,gpu166,gpu125,gpu052,gpu150,gpu001,gpu173,gpu028
     partition: "a40,rtx6000"
     symlink_dir: /checkpoint/nng
 ########################################################

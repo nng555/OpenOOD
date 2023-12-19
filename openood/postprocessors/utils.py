@@ -1,5 +1,6 @@
 from openood.utils import Config
 
+from .analog_postprocessor import AnalogPostprocessor
 from .ash_postprocessor import ASHPostprocessor
 from .base_postprocessor import BasePostprocessor
 from .cider_postprocessor import CIDERPostprocessor
@@ -44,6 +45,7 @@ from .gen_postprocessor import GENPostprocessor
 
 def get_postprocessor(config: Config):
     postprocessors = {
+        'analog': AnalogPostprocessor,
         'ash': ASHPostprocessor,
         'cider': CIDERPostprocessor,
         'conf_branch': ConfBranchPostprocessor,

@@ -331,7 +331,7 @@ def get_network(network_config):
 
     elif network_config.name == 'bit':
         net = KNOWN_MODELS[network_config.model](
-            head_size=network_config.num_logits,
+            head_size=network_config.num_classes,
             zero_head=True,
             num_block_open=network_config.num_block_open)
 
@@ -410,8 +410,21 @@ def get_network(network_config):
                 for subnet_name, subnet in net.items():
                     subnet.load_state_dict(subnet_ckpts[subnet_name])
 
-        elif network_config.name == 'bit' and not network_config.normal_load:
-            net.load_from(np.load(network_config.checkpoint))
+        elif network_config.name == 'bit':
+            state_dict = torch.load(network_config.checkpoint)['model']
+            if 'module' in list(state_dict.keys())[0]:
+                for k in list(state_dict.keys()):
+                    state_dict[k.split('module.')[1]] = state_dict[k]
+                    del state_dict[k]
+                for k in list(state_dict.keys()):
+                    if k == 'head.gn.weight':
+                        state_dict['before_head.gn.weight'] = state_dict[k]
+                        del state_dict[k]
+                    elif k == 'head.gn.bias':
+                        state_dict['before_head.gn.bias'] = state_dict[k]
+                        del state_dict[k]
+            net.load_state_dict(state_dict)
+            #net.load_from(np.load(network_config.checkpoint))
         elif network_config.name == 'vit':
             pass
         else:

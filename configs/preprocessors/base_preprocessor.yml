@@ -1,2 +1,4 @@
 preprocessor:
   name: base
+  augment: False
+  test_augment: False

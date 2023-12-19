@@ -1,4 +1,5 @@
 from typing import Any
+import numpy as np
 from tqdm import tqdm
 
 import torch
@@ -44,9 +45,15 @@ class BasePostprocessor:
             else:
                 pred, conf, extra = res
 
+            if torch.is_tensor(pred):
+                pred = pred.cpu().numpy()
             pred_list.append(pred)
+            if torch.is_tensor(conf):
+                conf = conf.cpu().numpy()
             conf_list.append(conf)
-            label_list.append(label.cpu().numpy())
+            if torch.is_tensor(label):
+                label = label.cpu().numpy()
+            label_list.append(label)
 
             if extra is not None:
                 for k, v in extra.items():

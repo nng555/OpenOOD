@@ -1,3 +1,4 @@
+from .analog_postprocessor import AnalogPostprocessor
 from .ash_postprocessor import ASHPostprocessor
 from .base_postprocessor import BasePostprocessor
 from .cider_postprocessor import CIDERPostprocessor
