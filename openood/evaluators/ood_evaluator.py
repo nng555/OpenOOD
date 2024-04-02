@@ -1,4 +1,5 @@
 import csv
+import time
 import os
 from typing import Dict, List
 
@@ -35,7 +36,14 @@ class OODEvaluator(BaseEvaluator):
             for subnet in net.values():
                 subnet.eval()
         else:
-            net.eval()
+            if 'mcd' in self.config.network and self.config.network.mcd:
+                print("Turning off batchnorm and turning on dropout")
+                net.train()
+                for m in net.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.eval()
+            else:
+                net.eval()
         assert 'test' in id_data_loaders, \
             'id_data_loaders should have the key: test!'
         dataset_name = self.config.dataset.name
@@ -54,9 +62,52 @@ class OODEvaluator(BaseEvaluator):
             self._save_scores(vid_pred, vid_conf, vid_gt, vid_extra, 'ood_val')
         """
 
-        print(f'Performing inference on {dataset_name} test dataset...', flush=True)
+        if 'use_train' in self.config.postprocessor and self.config.postprocessor.use_train:
+            print(f'Performing inference on {dataset_name} train dataset...', flush=True)
+            id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
+                net, id_data_loaders['train'], use_labels=True)
+            if self.config.recorder.save_scores:
+                self._save_scores(id_pred, id_conf, id_gt, id_extra, dataset_name + '_train')
+
+        if 'skip_ood' in self.config.postprocessor and self.config.postprocessor.skip_ood:
+            return
+
+        if 'fsgm' in self.config.postprocessor and self.config.postprocessor.fgsm:
+            print(f'Performing inference on {dataset_name} test dataset...', flush=True)
+            id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
+                net, id_data_loaders['test'])
+            if self.config.recorder.save_scores:
+                self._save_scores(id_pred, id_conf, id_gt, id_extra, dataset_name)
+
+            print(f'Performing inference on {dataset_name} test dataset with FGSM...', flush=True)
+            fg_pred, fg_conf, fg_gt, fg_extra = postprocessor.inference(
+                net, id_data_loaders['test'], use_labels=True)
+            if self.config.recorder.save_scores:
+                self._save_scores(fg_pred, fg_conf, fg_gt, fg_extra, dataset_name + '_fgsm')
+
+            psuccess = len(fg_pred) / len(id_pred) * 100
+            print(f"{psuccess}% successfully attacked")
+
+            pred = np.concatenate([id_pred, fg_pred])
+            conf = np.concatenate([id_conf, fg_conf])
+            label = np.concatenate([id_gt, np.ones_like(fg_gt) * -1])
+
+            print(f'Computing metrics on {dataset_name} dataset...')
+
+            ood_metrics = compute_all_metrics(conf, label, pred)
+            print(f"AUROC: {ood_metrics[1]}")
+            import ipdb; ipdb.set_trace()
+
+            return
+
+        print(f'Performing warmup inference on {dataset_name} test dataset...', flush=True)
+        timer = time.time()
         id_pred, id_conf, id_gt, id_extra = postprocessor.inference(
             net, id_data_loaders['test'])
+        if id_extra and 'ptime' in id_extra:
+            print(f"Total ptime: {np.sum(id_extra['ptime'])}")
+        print('Time used for {} test dataset: {:.4f}s'.format(dataset_name, time.time() - timer))
+
         if self.config.recorder.save_scores:
             self._save_scores(id_pred, id_conf, id_gt, id_extra, dataset_name)
 
@@ -101,7 +152,11 @@ class OODEvaluator(BaseEvaluator):
         for dataset_name, ood_dl in ood_data_loaders[ood_split].items():
             print(f'Performing inference on {dataset_name} dataset...',
                   flush=True)
+            timer = time.time()
             ood_pred, ood_conf, ood_gt, ood_extra = postprocessor.inference(net, ood_dl)
+            if ood_extra and 'ptime' in ood_extra:
+                print(f"Total ptime: {np.sum(ood_extra['ptime'])}")
+            print('Time used for {}: {:.4f}s'.format(dataset_name, time.time() - timer))
             ood_gt = -1 * np.ones_like(ood_gt)  # hard set to -1 as ood
             if self.config.recorder.save_scores:
                 self._save_scores(ood_pred, ood_conf, ood_gt, ood_extra, dataset_name)
@@ -131,7 +186,14 @@ class OODEvaluator(BaseEvaluator):
             for subnet in net.values():
                 subnet.eval()
         else:
-            net.eval()
+            if 'mcd' in self.config.network and self.config.network.mcd:
+                print("Turning off batchnorm and turning on dropout")
+                net.train()
+                for m in net.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.eval()
+            else:
+                net.eval()
         assert 'val' in id_data_loaders
         assert 'val' in ood_data_loaders
         if self.config.postprocessor.APS_mode:
@@ -209,9 +271,19 @@ class OODEvaluator(BaseEvaluator):
         if type(net) is dict:
             net['backbone'].eval()
         else:
-            net.eval()
+            if 'mcd' in self.config.network and self.config.network.mcd:
+                print("Turning off batchnorm and turning on dropout")
+                net.train()
+                for m in net.modules():
+                    if isinstance(m, nn.BatchNorm2d):
+                        m.eval()
+            else:
+                net.eval()
         self.id_pred, self.id_conf, self.id_gt, self.extra = postprocessor.inference(
             net, data_loader)
+
+        if self.extra and 'ptime' in self.extra:
+            print(f"Total ptime: {np.sum(self.extra['ptime'])}")
 
         if fsood:
             assert csid_data_loaders is not None

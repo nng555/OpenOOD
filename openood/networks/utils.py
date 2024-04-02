@@ -14,6 +14,7 @@ from .csi_net import get_csi_linear_layers, CSINet
 from .cider_net import CIDERNet
 from .de_resnet18_256x256 import AttnBasicBlock, BN_layer, De_ResNet18_256x256
 from .densenet import DenseNet3
+from .densenet_pt import DenseNet
 from .draem_net import DiscriminativeSubNetwork, ReconstructiveSubNetwork
 from .dropout_net import DropoutNet
 from .dsvdd_net import build_network
@@ -27,6 +28,7 @@ from .openmax_net import OpenMax
 from .patchcore_net import PatchcoreNet
 from .projection_net import ProjectionNet
 from .react_net import ReactNet
+from .resnet9_32x32 import ResNet9_32x32
 from .resnet18_32x32 import ResNet18_32x32
 from .resnet18_64x64 import ResNet18_64x64
 from .resnet18_224x224 import ResNet18_224x224
@@ -49,7 +51,11 @@ def get_network(network_config):
         bn_affine = network_config.bn_affine
         random_affine = network_config.random_affine
         residual = network_config.residual
-        net = ResNet18_32x32(num_classes=num_classes, use_bn=use_bn, bn_affine=bn_affine, random_affine=random_affine, residual=residual)
+        dropout = network_config.dropout
+        net = ResNet18_32x32(num_classes=num_classes, use_bn=use_bn, bn_affine=bn_affine, random_affine=random_affine, residual=residual, dropout=dropout)
+
+    elif network_config.name == 'resnet9_32x32':
+        net = ResNet9_32x32(num_classes=num_classes)
 
     elif network_config.name == 'nin':
         use_bn = network_config.use_bn
@@ -114,12 +120,15 @@ def get_network(network_config):
                          num_classes=num_classes)
 
     elif network_config.name == 'densenet':
+        net = DenseNet(32, (6, 12, 24, 16), 64, num_classes=num_classes)
+        """
         net = DenseNet3(depth=100,
                         growth_rate=12,
                         reduction=0.5,
                         bottleneck=True,
                         dropRate=0.0,
                         num_classes=num_classes)
+        """
 
     elif network_config.name == 'patchcore_net':
         # path = '/home/pengyunwang/.cache/torch/hub/vision-0.9.0'
@@ -399,6 +408,8 @@ def get_network(network_config):
                                                    strict=False)
             elif isinstance(network_config.checkpoint, str):
                 ckpt = torch.load(network_config.checkpoint)
+
+
                 subnet_ckpts = {k: {} for k in net.keys()}
                 for k, v in ckpt.items():
                     for subnet_name in net.keys():
@@ -409,6 +420,8 @@ def get_network(network_config):
 
                 for subnet_name, subnet in net.items():
                     subnet.load_state_dict(subnet_ckpts[subnet_name])
+
+
 
         elif network_config.name == 'bit':
             state_dict = torch.load(network_config.checkpoint)['model']
@@ -428,15 +441,28 @@ def get_network(network_config):
         elif network_config.name == 'vit':
             pass
         else:
-            try:
-                net.load_state_dict(torch.load(network_config.checkpoint),
-                                    strict=False)
+            #try:
+            ckpt = torch.load(network_config.checkpoint)
+            if 'swag' in network_config and network_config.swag:
+                print("Sampling SWAG-D parameters")
+                param_vars = torch.load(network_config.swag_path)
+                for k in ckpt:
+                    if 'running' in k:
+                        continue
+                    param_vars[k][param_vars[k] < 0] = 0.0
+                    ckpt[k] = torch.normal(ckpt[k], torch.sqrt(param_vars[k]))
+
+            net.load_state_dict(ckpt,
+                                strict=False)
+            """
             except RuntimeError:
+                import ipdb; ipdb.set_trace()
                 # sometimes fc should not be loaded
                 loaded_pth = torch.load(network_config.checkpoint)
                 loaded_pth.pop('fc.weight')
                 loaded_pth.pop('fc.bias')
                 net.load_state_dict(loaded_pth, strict=False)
+            """
         print('Model Loading {} Completed!'.format(network_config.name))
 
     if network_config.num_gpus > 1:

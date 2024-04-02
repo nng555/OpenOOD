@@ -13,8 +13,8 @@ postprocessor:
     state_name: analog
     topk: -1
     reduce: False
-    sua: True
-    fuse: True
+    sua: False
+    fuse: False
     loss_scale : 1
     root_dir: /h/nng/projects/OpenOOD/results/ekfac
 

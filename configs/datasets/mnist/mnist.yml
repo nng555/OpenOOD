@@ -4,6 +4,12 @@ dataset:
   image_size: 28
   pre_size: 28
   subset: -1.0
+  comp_index: -1
+  ood_comp: cifar10
+  comp_label: 0
+  corruption_path: default
+  prune: 0.0
+  prune_path: default
 
   interpolation: bilinear
   normalization_type: mnist

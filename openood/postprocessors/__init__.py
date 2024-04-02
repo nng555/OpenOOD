@@ -9,6 +9,7 @@ from .draem_postprocessor import DRAEMPostprocessor
 from .dropout_postprocessor import DropoutPostProcessor
 from .dsvdd_postprocessor import DSVDDPostprocessor
 from .ebo_postprocessor import EBOPostprocessor
+from .ekfac import EKFAC
 from .ensemble_postprocessor import EnsemblePostprocessor
 from .gmm_postprocessor import GMMPostprocessor
 from .godin_postprocessor import GodinPostprocessor

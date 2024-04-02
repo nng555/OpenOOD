@@ -1,0 +1,22 @@
+ood_dataset:
+  name: cifar10_ood
+  num_classes: 10
+
+  num_workers: '@{num_workers}'
+  num_gpus: '@{num_gpus}'
+  num_machines: '@{num_machines}'
+
+  dataset_class: ImglistDataset
+  batch_size: 128
+  shuffle: False
+  subset: -1.0
+
+  split_names: [val, nearood]
+  val:
+    data_dir: /h/nng/projects/OpenOOD/data/images_classic/
+    imglist_pth: /h/nng/projects/OpenOOD/data/benchmark_imglist/cifar10/val_tin.txt
+  nearood:
+    data_dir: /h/nng/projects/OpenOOD/data/images_classic/CIFAR-10-C
+    label_pth: labels.npy
+    np: True
+    datasets: brightness

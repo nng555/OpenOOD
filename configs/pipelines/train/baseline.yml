@@ -4,6 +4,7 @@ save_output: True
 merge_option: default
 mark: default
 seed: 0
+pbrf: False
 
 num_gpus: 1
 num_workers: 8
@@ -21,6 +22,7 @@ pipeline:
 
 trainer:
   name: base
+  swag: -1
 
 evaluator:
   name: base
@@ -31,7 +33,10 @@ optimizer:
   lr: 0.1
   momentum: 0.9
   weight_decay: 0.0005
+  schedule: stepwise
 
 recorder:
   name: base
+  save_any_model: True
   save_all_models: False
+  trace: False

@@ -1,0 +1,14 @@
+postprocessor:
+  name: asdl
+  APS_mode: False
+  skip_id: False
+  postprocessor_args:
+    damping: 0.0
+    loss_name: ce
+    temp: 1
+    state_name: analog
+    topk: -1
+    fuse: False
+    loss_scale : 1
+    root_dir: /h/nng/projects/OpenOOD/results/ekfac
+

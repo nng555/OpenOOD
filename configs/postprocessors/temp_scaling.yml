@@ -1,3 +1,6 @@
 postprocessor:
-  name: temperature_scaling
+  name: temp_scaling
   APS_mode: False
+  use_train: False
+  fgsm: False
+  skip_ood: False

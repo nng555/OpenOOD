@@ -2,10 +2,22 @@ defaults:
   - _self_
   - override hydra/launcher: slurm
 
+prune: ~
+epoch: ~
+comp_index: ~
+variance: ~
+only_logit: ~
+ce_left: ~
+model: ~
+dropout: ~
+comp_label: ~
+cpath: ~
+stop: ~
 seed: ~
 topk: ~
 ntrain: ~
 layerscale: ~
+regret: ~
 floss_fn: ~
 tags: ~
 damping: ~
@@ -14,12 +26,14 @@ right_output: ~
 command: ~
 temp: ~
 eigen_temp: ~
+loss_scale: ~
 moments_temp: ~
 grad_temp: ~
 relative: ~
 use_bn: ~
 topp: ~
 sample: ~
+name: ~
 
 hydra:
 ##### SUGGESTED HYDRA CONFIG ###########################
@@ -36,7 +50,7 @@ hydra:
     env_type: venv
     env_name: pkvb
     gres: gpu:1
-    exclude: gpu012,gpu166,gpu125,gpu052,gpu150,gpu001,gpu173,gpu028
+    exclude: gpu012,gpu166,gpu125,gpu052,gpu150,gpu001,gpu173,gpu028,gpu129,gpu127,gpu141,gpu159,gpu162,gpu154,gpu148,gpu157,gpu138,gpu046,gpu039,gpu007,gpu123,gpu130,gpu122,gpu124,gpu135,gpu124,gpu121,gpu140,gpu137,gpu180,gpu175,gpu015,gpu032,gpu151
     partition: "a40,rtx6000"
     symlink_dir: /checkpoint/nng
 ########################################################

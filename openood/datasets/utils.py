@@ -1,4 +1,6 @@
 import os
+import numpy as np
+import json
 import torch
 from numpy import load
 from torch.utils.data import DataLoader, Subset
@@ -9,6 +11,7 @@ from openood.utils.config import Config
 
 from .feature_dataset import FeatDataset
 from .imglist_dataset import ImglistDataset
+from .np_dataset import NPDataset
 from .imglist_augmix_dataset import ImglistAugMixDataset
 from .imglist_extradata_dataset import ImglistExtraDataDataset, TwoSourceSampler
 from .udg_dataset import UDGDataset
@@ -26,6 +29,19 @@ def get_dataloader(config: Config):
         preprocessor = get_preprocessor(config, split)
         # weak augmentation for data_aux
         data_aux_preprocessor = TestStandardPreProcessor(config)
+
+        if split_config.dataset_class == 'cifar':
+            dataset = CIFAR10(
+                '/h/nng/projects/OpenOOD/data/images_classic/cifar10',
+                train=(split == 'train'),
+                transform=preprocessor.transform,
+            )
+
+            dataloader = DataLoader(
+                dataset,
+                num_workers=dataset_config.num_workers,
+                shuffle=False,
+            )
 
         if split_config.dataset_class == 'ImglistExtraDataDataset':
             dataset = ImglistExtraDataDataset(
@@ -107,8 +123,32 @@ def get_dataloader(config: Config):
                 dataloader_dict[split + '_class'] = class_loaders
             """
 
-
         dataloader_dict[split] = dataloader
+
+    if 'corruption_path' in config.dataset and config.dataset.corruption_path != 'default':
+        print(f"Corrupting train data from {config.dataset.corruption_path}")
+        cpath = '/'.join(config.dataset.train.imglist_pth.split('/')[:-1]) + f'/train_{config.dataset.name}_{config.dataset.corruption_path}.npy'
+        corruptions = np.load(cpath, allow_pickle=True).item()['cmap']
+
+        print("Example corruptions...")
+        i = 0
+        for orig, new in corruptions.items():
+            print(f"{orig.strip()} --> {new.strip()}")
+            i += 1
+            if i == 3:
+                break
+
+        dataloader_dict['train'].dataset.imglist = [corruptions.get(img, img) for img in dataloader_dict['train'].dataset.imglist]
+
+    if 'prune' in config.dataset and config.dataset.prune != 0:
+        assert os.path.exists(config.dataset.prune_path), "Pruning order not found"
+        # assume ordered from least useful to most useful
+        prune_order = np.load(config.dataset.prune_path)
+        prune_idx = int(config.dataset.prune * len(prune_order))
+        print(f"Pruning {prune_idx} examples")
+        prune_order = np.sort(prune_order[prune_idx:])
+        dataloader_dict['train'].dataset.imglist = [dataloader_dict['train'].dataset.imglist[i] for i in prune_order]
+
     return dataloader_dict
 
 
@@ -142,15 +182,29 @@ def get_ood_dataloader(config: Config):
         else:
             # dataloaders for csid, nearood, farood
             sub_dataloader_dict = {}
+
+            if isinstance(split_config.datasets, str):
+                split_config.datasets = [split_config.datasets]
+
             for dataset_name in split_config.datasets:
-                dataset_config = split_config[dataset_name]
-                dataset = CustomDataset(
-                    name=ood_config.name + '_' + split,
-                    imglist_pth=dataset_config.imglist_pth,
-                    data_dir=dataset_config.data_dir,
-                    num_classes=ood_config.num_classes,
-                    preprocessor=preprocessor,
-                    data_aux_preprocessor=data_aux_preprocessor)
+                if 'np' in split_config and split_config.np:
+                    dataset = NPDataset(
+                        name=ood_config.name + '_' + split,
+                        data_dir=split_config.data_dir,
+                        corruption=dataset_name,
+                        label_pth=split_config.label_pth,
+                        num_classes=ood_config.num_classes,
+                        preprocessor=preprocessor,
+                        data_aux_preprocessor=data_aux_preprocessor)
+                else:
+                    dataset_config = split_config[dataset_name]
+                    dataset = CustomDataset(
+                        name=ood_config.name + '_' + split,
+                        imglist_pth=dataset_config.imglist_pth,
+                        data_dir=dataset_config.data_dir,
+                        num_classes=ood_config.num_classes,
+                        preprocessor=preprocessor,
+                        data_aux_preprocessor=data_aux_preprocessor)
                 if subset > 0:
                     nskip = int(1. / subset)
                     dataset = Subset(dataset, list(range(0, len(dataset), nskip)))

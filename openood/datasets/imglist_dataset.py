@@ -66,11 +66,19 @@ class ImglistDataset(BaseDataset):
         line = self.imglist[index].strip('\n')
         tokens = line.split(' ', 1)
         image_name, extra_str = tokens[0], tokens[1]
+
+        if 'extra' in tokens[1]:
+            pbrf = True
+            extra_str = tokens[1].strip('extra')
+        else:
+            pbrf = False
+
         if self.data_dir != '' and image_name.startswith('/'):
             raise RuntimeError('image_name starts with "/"')
         path = os.path.join(self.data_dir, image_name)
         sample = dict()
         sample['image_name'] = image_name
+        sample['pbrf'] = pbrf
         kwargs = {'name': self.name, 'path': path, 'tokens': tokens}
         try:
             # some preprocessor methods require setup

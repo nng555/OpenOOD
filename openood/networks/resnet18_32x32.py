@@ -32,7 +32,7 @@ def fuse_conv(conv, bn):
 class BasicBlock(nn.Module):
     expansion = 1
 
-    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False, residual=True):
+    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False, residual=True, dropout=0.0):
         super(BasicBlock, self).__init__()
         self.use_bn = use_bn
         self.residual = residual
@@ -79,6 +79,10 @@ class BasicBlock(nn.Module):
                                           stride=stride,
                                           bias=False))
 
+        self.use_dropout = (dropout != 0.0)
+        if dropout != 0.0:
+            self.dropout = nn.Dropout(dropout)
+
     def fuse_conv_bn_layers(self):
         assert self.use_bn, 'can only fuse if using BN'
         self.use_bn = False
@@ -92,6 +96,8 @@ class BasicBlock(nn.Module):
     def forward(self, x):
         if self.use_bn:
             out = self.relu(self.bn1(self.conv1(x)))
+            if self.use_dropout:
+                out = self.dropout(out)
             out = self.bn2(self.conv2(out))
         else:
             out = self.relu(self.conv1(x))
@@ -108,10 +114,13 @@ class BasicBlock(nn.Module):
 class Bottleneck(nn.Module):
     expansion = 4
 
-    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False, residual=True):
+    def __init__(self, in_planes, planes, stride=1, use_bn=True, bn_affine=True, random_affine=False, residual=True, dropout=0.0):
         super(Bottleneck, self).__init__()
         self.use_bn = use_bn
         self.residual = residual
+        self.use_dropout = (dropout != 0.0)
+        if dropout != 0.0:
+            self.dropout = nn.Dropout(dropout)
         self.relu = nn.ReLU()
 
         self.conv1 = nn.Conv2d(in_planes, planes, kernel_size=1, bias=False)
@@ -176,6 +185,8 @@ class Bottleneck(nn.Module):
         if self.use_bn:
             out = self.relu(self.bn1(self.conv1(x)))
             out = self.relu(self.bn2(self.conv2(out)))
+            if self.use_dropout:
+                out = self.dropout(out)
             out = self.bn3(self.conv3(out))
         else:
             out = self.relu(self.conv1(x))
@@ -190,12 +201,15 @@ class Bottleneck(nn.Module):
 
 
 class ResNet18_32x32(nn.Module):
-    def __init__(self, block=BasicBlock, num_blocks=None, num_classes=10, use_bn=True, bn_affine=True, random_affine=False, residual=True):
+    def __init__(self, block=BasicBlock, num_blocks=None, num_classes=10, use_bn=True, bn_affine=True, random_affine=False, residual=True, dropout=0.0):
         super(ResNet18_32x32, self).__init__()
         self.use_bn = use_bn
         self.residual = residual
         self.bn_affine = bn_affine
         self.random_affine = random_affine
+        self.use_dropout = (dropout != 0.0)
+        if dropout != 0.0:
+            self.dropout = nn.Dropout(dropout)
 
         self.relu = nn.ReLU()
 
@@ -214,23 +228,23 @@ class ResNet18_32x32(nn.Module):
             if self.random_affine:
                 randomize_bn(self.bn1)
         self.layer1 = self._make_layer(block, 64, num_blocks[0], stride=1,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual, dropout=dropout)
         self.layer2 = self._make_layer(block, 128, num_blocks[1], stride=2,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual, dropout=dropout)
         self.layer3 = self._make_layer(block, 256, num_blocks[2], stride=2,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual, dropout=dropout)
         self.layer4 = self._make_layer(block, 512, num_blocks[3], stride=2,
-                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual)
+                use_bn=self.use_bn, bn_affine=self.bn_affine, random_affine=self.random_affine, residual=self.residual, dropout=dropout)
         # self.avgpool = nn.AvgPool2d(4)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(512 * block.expansion, num_classes)
         self.feature_size = 512 * block.expansion
 
-    def _make_layer(self, block, planes, num_blocks, stride, use_bn, bn_affine, random_affine, residual):
+    def _make_layer(self, block, planes, num_blocks, stride, use_bn, bn_affine, random_affine, residual, dropout):
         strides = [stride] + [1] * (num_blocks - 1)
         layers = []
         for stride in strides:
-            layers.append(block(self.in_planes, planes, stride, use_bn, bn_affine, random_affine, residual))
+            layers.append(block(self.in_planes, planes, stride, use_bn, bn_affine, random_affine, residual, dropout))
             self.in_planes = planes * block.expansion
         return nn.Sequential(*layers)
 
@@ -253,6 +267,9 @@ class ResNet18_32x32(nn.Module):
                 feature1 = self.relu(self.conv1(x))
         else:
             feature1 = x
+
+        if self.use_dropout:
+            feature1 = self.dropout(feature1)
 
         if lindex < 1:
             feature2 = self.layer1(feature1)

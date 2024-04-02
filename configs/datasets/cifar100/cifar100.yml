@@ -3,6 +3,12 @@ dataset:
   num_classes: 100
   image_size: 32
   pre_size: 32
+  comp_index: -1
+  ood_comp: cifar10
+  comp_label: 0
+  corruption_path: default
+  prune_path: default
+  prune: 0.0
 
   interpolation: bilinear
   normalization_type: cifar100

@@ -2,6 +2,10 @@
 _test_*
 *-backup*
 *.png
+*.ckpt
+*.cpt
+*.csv
+*.npz
 
 # ignore data and output directory
 data

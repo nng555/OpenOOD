@@ -1,6 +1,7 @@
 from openood.utils import Config
 
 from .analog_postprocessor import AnalogPostprocessor
+from .asdl_postprocessor import ASDLPostprocessor
 from .ash_postprocessor import ASHPostprocessor
 from .base_postprocessor import BasePostprocessor
 from .cider_postprocessor import CIDERPostprocessor
@@ -45,6 +46,7 @@ from .gen_postprocessor import GENPostprocessor
 
 def get_postprocessor(config: Config):
     postprocessors = {
+        'asdl': ASDLPostprocessor,
         'analog': AnalogPostprocessor,
         'ash': ASHPostprocessor,
         'cider': CIDERPostprocessor,
@@ -68,7 +70,7 @@ def get_postprocessor(config: Config):
         'npos': NPOSPostprocessor,
         'residual': ResidualPostprocessor,
         'klm': KLMatchingPostprocessor,
-        'temperature_scaling': TemperatureScalingPostprocessor,
+        'temp_scaling': TemperatureScalingPostprocessor,
         'ensemble': EnsemblePostprocessor,
         'dropout': DropoutPostProcessor,
         'draem': DRAEMPostprocessor,

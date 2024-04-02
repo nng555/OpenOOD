@@ -34,7 +34,7 @@ from .mixoe_trainer import MixOETrainer
 
 
 def get_trainer(net, train_loader: DataLoader, val_loader: DataLoader,
-                config: Config):
+                config: Config, base_net):
     if type(train_loader) is DataLoader:
         trainers = {
             'base': BaseTrainer,
@@ -69,7 +69,7 @@ def get_trainer(net, train_loader: DataLoader, val_loader: DataLoader,
             return trainers[config.trainer.name](net, train_loader, val_loader,
                                                  config)
         else:
-            return trainers[config.trainer.name](net, train_loader, config)
+            return trainers[config.trainer.name](net, train_loader, config, base_net)
 
     else:
         trainers = {

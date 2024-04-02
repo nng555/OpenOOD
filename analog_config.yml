@@ -1,5 +1,5 @@
 hessian:
-  damping: 1.0e-06
+  damping: 1.0e-30
   reduce: false
-  sua: true
+  sua: false
 root_dir: /h/nng/projects/OpenOOD/results/ekfac

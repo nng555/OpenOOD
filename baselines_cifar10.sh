@@ -1,7 +1,7 @@
 #!/bin/bash
 
 HDIR=/h/nng/projects/OpenOOD
-for baseline in msp mls odin knn ebo rmds; do 
+for baseline in temp_scaling; do 
   python3 ${HDIR}/main.py \
     --config ${HDIR}/configs/datasets/cifar10/cifar10_ood.yml \
     ${HDIR}/configs/networks/resnet18_32x32.yml \

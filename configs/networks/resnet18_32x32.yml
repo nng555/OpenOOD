@@ -1,4 +1,9 @@
 network:
+  swa: False
+  swag: False
+  swag_path: default
+  mcd: False
+  dropout: 0.0
   name: resnet18_32x32
   num_classes: '@{dataset.num_classes}'
   pretrained: False          # set 'True' to load pretrained model

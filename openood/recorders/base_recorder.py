@@ -15,21 +15,31 @@ class BaseRecorder:
         self.begin_time = time.time()
         self.output_dir = config.output_dir
 
-    def report(self, train_metrics, val_metrics):
-        print('\nEpoch {:03d} | Time {:5d}s | Train Loss {:.4f} | '
-              'Val Loss {:.3f} | Val Acc {:.2f}'.format(
-                  (train_metrics['epoch_idx']),
-                  int(time.time() - self.begin_time), train_metrics['loss'],
-                  val_metrics['loss'], 100.0 * val_metrics['acc']),
-              flush=True)
+    def report(self, train_metrics, val_metrics, test=False):
+        if test:
+            print('\nEpoch {:03d} | Time {:5d}s | Train Loss {:.4f} | '
+                  'Test Loss {:.3f} | Test Acc {:.2f}'.format(
+                      (train_metrics['epoch_idx']),
+                      int(time.time() - self.begin_time), train_metrics['loss'],
+                      val_metrics['loss'], 100.0 * val_metrics['acc']),
+                  flush=True)
+        else:
+            print('\nEpoch {:03d} | Time {:5d}s | Train Loss {:.4f} | '
+                  'Val Loss {:.3f} | Val Acc {:.2f}'.format(
+                      (train_metrics['epoch_idx']),
+                      int(time.time() - self.begin_time), train_metrics['loss'],
+                      val_metrics['loss'], 100.0 * val_metrics['acc']),
+                  flush=True)
 
-    def save_model(self, net, val_metrics):
+    def save_model(self, net, val_metrics, epoch_idx=None):
         try:
             state_dict = net.module.state_dict()
         except AttributeError:
             state_dict = net.state_dict()
 
-        if self.config.recorder.save_all_models:
+        if (self.config.recorder.save_all_models and epoch_idx % 5 == 0) or \
+            (self.config.recorder.trace and \
+             (epoch_idx is not None and epoch_idx % 20 == 0)):
             torch.save(
                 state_dict,
                 os.path.join(

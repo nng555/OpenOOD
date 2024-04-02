@@ -72,7 +72,7 @@ class PreActBottleneck(nn.Module):
                              stride)  # Original code has it on conv1!!
         self.gn3 = nn.GroupNorm(32, cmid)
         self.conv3 = conv1x1(cmid, cout)
-        self.relu = nn.ReLU(inplace=True)
+        self.relu = nn.ReLU(inplace=False)
 
         if (stride != 1 or cin != cout):
             # Projection also with pre-activation according to paper.
@@ -220,7 +220,7 @@ class ResNetV2(nn.Module):
         self.before_head = nn.Sequential(
             OrderedDict([
                 ('gn', nn.GroupNorm(32, 2048 * wf)),
-                ('relu', nn.ReLU(inplace=True)),
+                ('relu', nn.ReLU(inplace=False)),
                 ('avg', nn.AdaptiveAvgPool2d(output_size=1)),
             ]))
 

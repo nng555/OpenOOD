@@ -82,7 +82,7 @@ class AnalogPostprocessor(BasePostprocessor):
         elif self.topk != -1:
             logits = torch.topk(logits, self.topk, -1)[0]
 
-        loss = self.temp * F.cross_entropy(logits, targets, reduction="sum")
+        loss = F.cross_entropy(logits, targets, reduction="sum")
         return self.loss_scale * loss
 
     def logit_margin_loss(self, logits, targets=None):
@@ -92,16 +92,16 @@ class AnalogPostprocessor(BasePostprocessor):
                 #targets = torch.multinomial(probs, 1).squeeze()
                 targets = torch.randint(0, self.num_classes, (len(logits),)).cuda()
             else:
-                logits = torch.sort(logits, self.topk, -1)[0]
-                logits = logits[:, ::(self.num_classes/self.topk)]
+                logits = torch.sort(logits, -1)[0]
+                logits = logits[:, ::int(self.num_classes/self.topk)]
                 targets = torch.randint(0, len(logits[0]), (len(logits),)).cuda()
         elif self.topk != -1:
-            logits = torch.sort(logits, self.topk, -1)[0]
-            logits = logits[:, ::(self.num_classes/self.topk)]
+            logits = torch.sort(logits, -1)[0]
+            logits = logits[:, ::int(self.num_classes/self.topk)]
 
         # (z - zi).mean()
-        loss = 2 * logits.take_along_dim(targets.unsqueeze(-1), -1).squeeze() - logits.sum(-1)
-        loss = loss.sum()
+        loss = logits - logits.take_along_dim(targets.unsqueeze(-1), -1)
+        loss = loss.mean(-1).sum()
         return self.loss_scale * loss
 
     def setup(self, net: nn.Module, id_loader_dict, ood_loader_dict):
@@ -120,6 +120,24 @@ class AnalogPostprocessor(BasePostprocessor):
             if os.path.exists(os.path.join(self.root_dir, self.state_name, 'state')):
                 self.analog.initialize_from_log()
             else:
+                """
+                for i, batch in enumerate(tqdm(id_loader_dict['train'],
+                                               desc='Hessian: ',
+                                               position=0,
+                                               leave=True,
+                                               total=len(id_loader_dict['train']))):
+                    data = batch['data'].cuda()
+                    targets = batch['label'].cuda()
+                    data_id = self.id_gen(data)
+                    with self.analog(data_id=data_id):
+                        net.zero_grad()
+                        logits = net(data)
+                        loss = self.loss_fn(logits, targets)
+                        loss.backward()
+
+                self.analog.finalize()
+
+                """
                 desc = "EKFAC Eigenbasis: "
                 total_epochs = self.eigen_epochs + self.moment_epochs
 
@@ -136,11 +154,12 @@ class AnalogPostprocessor(BasePostprocessor):
                                                    total=len(id_loader_dict['train']))):
 
                         data = batch['data'].cuda()
+                        targets = batch['label'].cuda()
                         data_id = self.id_gen(data)
                         with self.analog(data_id=data_id):
                             net.zero_grad()
                             logits = net(data)
-                            loss = self.loss_fn(logits)
+                            loss = self.loss_fn(logits, targets)
                             loss.backward()
 
                     if epoch == (self.eigen_epochs - 1) or epoch == (total_epochs - 1):
@@ -190,35 +209,11 @@ class AnalogPostprocessor(BasePostprocessor):
 
             test_log = self.analog.get_log()
             if_scores.append(
-                self.analog.influence.compute_self_influence(
+                self.analog.influence.compute_self_influence_norm(
                     test_log,
                     damping=self.damping,
                 )
             )
-
-            """
-            targets = torch.ones(len(data)).cuda().long() * k
-            params = {k: v.detach() for k, v in net.named_parameters()}
-            buffers = {k: v.detach() for k, v in net.named_buffers()}
-
-            vmap_grad = self.build_grad_fn(net, params, buffers)
-            vmap_log = vmap_grad(data, targets)
-
-            for k in list(vmap_log.keys()):
-                if 'weight' in k and 'bn' not in k and 'shortcut.1' not in k:
-                    if vmap_log[k].ndim == 5:
-                        vmap_log[k.strip('.weight')] = vmap_log[k].flatten(start_dim=-2)
-                    else:
-                        vmap_log[k.strip('.weight')] = vmap_log[k]
-                del vmap_log[k]
-
-            if_scores.append(
-                self.analog.influence.compute_self_influence(
-                    vmap_log,
-                    damping=self.damping,
-                )
-            )
-            """
 
         if_scores = torch.stack(if_scores, dim=-1)
 

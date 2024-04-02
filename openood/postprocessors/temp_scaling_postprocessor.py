@@ -56,6 +56,8 @@ class TemperatureScalingPostprocessor(BasePostprocessor):
 
             optimizer.step(eval)
 
+            self.temperature = nn.Parameter(torch.ones(1, device='cuda') * 1000)
+
             # print learned parameter temperature,
             # calculate NLL after temperature scaling
             after_temperature_nll = nll_criterion(

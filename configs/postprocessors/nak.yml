@@ -1,8 +1,17 @@
 postprocessor:
   name: nak
   APS_mode: False
+  use_train: False
   skip_id: False
+  skip_ood: False
+  fgsm: False
+  epsilon: 0.0
+
   postprocessor_args:
+    acnml: False
+    nsteps: 1
+    regret: linear
+    natural: True
     damping: 0.0
     all_classes: True
     eigen_iter: -1
@@ -32,7 +41,7 @@ postprocessor:
     inverse: True
     featskip: 1
     eigenscale: 1.0
-    temp: -1.0
+    temp: 1.0
     class_chunk_size: -1
     eigen_temp: -1.0
     remove_top_layers: 0
@@ -47,6 +56,8 @@ postprocessor:
     floss_fn: ce
     ce_weight: 1.0
     empirical : False
+    argmax: False
+    loss_scale: 1.0
     ind_sample: False
     off_diag: False
     layer_eps: False
@@ -57,3 +68,14 @@ postprocessor:
     eps_type: mean
     normalize: False
     total_eps: False
+    fisher_temp: 1.0
+    only_logit: True
+    swag_path: default
+    nsamples: 1
+    fgsm: False
+    epsilon: 0.0
+    fisher_regret: logit
+    ce_left: False
+    scale_logit: False
+    variance: 0.01
+    phase: False
