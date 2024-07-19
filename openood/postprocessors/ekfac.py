@@ -307,9 +307,9 @@ class EKFAC(Optimizer):
                 if is_diag:
                     state['exact_fw'] /= nbatches
                     state['exact_fb'] /= nbatches
-                else:
-                    state['xxt'] /= nbatches
-                    state['ggt'] /= nbatches
+                #else:
+                    #state['xxt'] /= nbatches
+                    #state['ggt'] /= nbatches
 
             elif op == 'average_moments':
                 assert 'nbatches' in kwargs, "Must provied nbatches"

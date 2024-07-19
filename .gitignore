@@ -6,6 +6,7 @@ _test_*
 *.cpt
 *.csv
 *.npz
+*.npy
 
 # ignore data and output directory
 data

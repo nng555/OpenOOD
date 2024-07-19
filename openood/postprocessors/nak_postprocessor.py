@@ -487,7 +487,9 @@ class NAKPostprocessor(BasePostprocessor):
                 if self.scale_logit:
                     conf = -((1 - probs) * probs * norm).sum(-1)
                 else:
-                    conf = -(probs * norm).sum(-1)
+                    #conf = -(probs * norm).sum(-1)
+                    conf = -(probs * torch.log(probs * norm)).sum(-1)
+
             else:
                 conf = -norm
 
@@ -503,6 +505,10 @@ class NAKPostprocessor(BasePostprocessor):
             else:
                 error_norm = None
                 grand = None
+
+            #nml = F.softmax(logits / self.temp, -1)
+            #nml = nml + nml * norm * self.alpha / 50000
+            #nml /= nml.sum(-1)[:, None]
 
             res = {'grand': grand, 'error_norm': error_norm, 'norm': norm.cpu().numpy(), 'logits': logits.detach().cpu().numpy(), 'raw_probs': F.softmax(logits, -1).detach().cpu().numpy(), 'probs': F.softmax(logits / self.temp, -1).detach().cpu().numpy(), 'ptime': ptime}
 

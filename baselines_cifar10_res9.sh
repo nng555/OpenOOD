@@ -10,5 +10,5 @@ for baseline in msp odin ebo mls knn gradnorm rmds vim gram; do
     ${HDIR}/configs/datasets/cifar10/cifar10.yml \
     ${HDIR}/configs/preprocessors/base_preprocessor.yml \
     --network.pretrained True \
-    --network.checkpoint ${HDIR}/models/checkpoints/cifar10_res9_s${1}_leaky.ckpt ${@:2}
+    --network.checkpoint ${HDIR}/models/checkpoints/cifar10_res9_s${1}_noaug.ckpt ${@:2}
 done
